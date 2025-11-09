@@ -1,0 +1,40 @@
+org_counts_df = rdata_results[list(rdata_results.keys())[0]] # Takes the first object loaded
+
+from collections import Counter
+from tqdm.auto import tqdm # Keep tqdm if you want a progress bar on the split operation
+tqdm.pandas()
+print('Preparing candidate frequency dictionary (Vectorized).')
+connection=apsw.Connection(DB_PATH)
+    c=connection.cursor()
+
+    c.execute("SELECT * FROM comments")
+    key_names_list = c.fetchall()
+
+    c.execute("PRAGMA table_info(comments);")
+    column_names = [row[1] for row in c.fetchall()]
+
+    print("Starting cleaning")
+    df = pd.DataFrame(key_names_list, columns = column_names)
+    cols = ['comment_url', 'submitter_name', 'organization', 'agency_acronym', 'docket_id', 'comment_title']
+
+    df = df[cols]
+    df['original_organization_name'] = df['organization']
+
+    # FRS, take what is before first comma
+    df.loc[df['agency_acronym']=='FRS', "organization"] = df.loc[df['agency_acronym']=='FRS', "organization"].str.split(',').map(lambda x: x[0]).map(lambda x: '' if '(' in x else x)
+
+    # FDIC take before first comma, before with, and before -
+    df.loc[df['agency_acronym']=='FDIC', "organization"] = df.loc[df['agency_acronym']=='FDIC', "organization"].str.split(',').map(lambda x: x[0] if x else '')
+    df.loc[df['agency_acronym']=='FDIC', "organization"] = df.loc[df['agency_acronym']=='FDIC', "organization"].str.split(' with ').map(lambda x: x[1] if len(x)>1 else x[0])
+    df.loc[df['agency_acronym']=='FDIC', "organization"] = df.loc[df['agency_acronym']=='FDIC', "organization"].str.split(' - ').map(lambda x: x[0] if x else '')
+
+    # SEC is difficult
+    df['submitter_name'] = df['submitter_name'].map(clean_fin_org_names)
+    df['organization'] = df['organization'].map(clean_fin_org_names)
+
+    #replace none
+    df.loc[df['submitter_name'].isna(), "submitter_name"] = ''
+
+    key_names_list = df.iloc[:,:] # include how many to match
+    # key_names_list = [(elem[0], clean_fin_org_names(elem[1]), clean_fin_org_names(elem[2]), elem[3], elem[4], elem[5]) for elem in key_names_list]
+    
