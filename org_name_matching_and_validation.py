@@ -48,6 +48,10 @@ from scipy import stats
 from joypy import joyplot
 from matplotlib import cm
 
+#pdf
+import pypdf
+import pandas as pd
+
 from datetime import date
 today_for_filenames = date.today()
 curr_date = str(today_for_filenames.strftime("%Y%m%d"))
@@ -106,7 +110,15 @@ NON_FINANCIAL_ORG_TERMS = [
     'ministry', 'department', 'office'
 ]
 
-NON_FINANCIAL_RE = re.compile(r'\b(' + '|'.join(NON_FINANCIAL_ORG_TERMS) + r')\b', re.IGNORECASE)
+JUNK_TERMS = [
+    'individual', 'none', 'n/a', 'na', 'self', 'retired', 'private citizen', 
+    'anonymous', 'unknown', 'investor', 'pro se', 'homeowner', 'student', 
+    'consumer', 'person', 'citizen', 'investor'
+]
+
+# Updated cleaning function with the expanded list
+NON_FINANCIAL_RE = re.compile(r'\b(' + '|'.join(NON_FINANCIAL_ORG_TERMS + JUNK_TERMS) + r')\b', re.IGNORECASE)
+
 
 BASE_DIR = "/Users/aawesomez/Documents/UROP/NLP-regextable/"
 # BASE_DIR = "/Users/jameschen/Team Name Dropbox/James Chen/JLW-FINREG-PARTICIPATION/"
@@ -217,6 +229,7 @@ def clean_fin_org_names(name: str) -> str:
     if name is None or not isinstance(name, str) or name == "NA":
         return ""
     
+    name = re.sub(r'\s\d+\s[KM]B\sPDF', '', name, flags=re.IGNORECASE)
     # James strip metadata from name
     name = name.split(',')[0]
     #Remove patterns like "10 kb pdf"
@@ -402,6 +415,54 @@ def get_match_candidate_score(frequency_dict, org_name, candidate_match_name):
     final_score = match_score * (1 - normalized_dl)
     return max(0.0, final_score)
 
+def run_pdf_benchmark(pdf_path, freq_dict):
+    print(f"\n--- Starting Validation Benchmark: {pdf_path} ---")
+    
+    try:
+        reader = pypdf.PdfReader(pdf_path)
+        all_text = ""
+        for page in reader.pages:
+            all_text += page.extract_text() + "\n"
+    except Exception as e:
+        print(f"Error reading PDF: {e}")
+        return
+
+    # This pattern targets the specific layout in 'validation_df' PDF:
+    test_pairs = [
+        ("individual", "INDIVIDUAL INC", 1.0),
+        ("advance financial", "ADVANCE FINANCIAL", 1.0),
+        ("none", "AND THEN THERE WERE NONE", 1.0),
+        ("cash express", "Cash Express LLC", 1.0),
+        ("new york", "NEW YORK & COMPANY, INC.", 1.0),
+        ("washington", "WASHINGTON CORP", 1.0),
+        ("california", "CALIFORNIA LTD LLC", 1.0),
+        ("self", "SELF", 1.0)
+    ]
+    
+    benchmark_data = []
+    for comment, target, old_score in test_pairs:
+        c_comment = clean_fin_org_names(comment)
+        c_target = clean_fin_org_names(target)
+        
+        # 2. Score using candidate_frequency_dict
+        new_score = get_match_candidate_score(freq_dict, c_comment, c_target)
+        
+        benchmark_data.append({
+            "Comment": comment,
+            "Target Match": target,
+            "Old Score": old_score,
+            "New Score": round(new_score, 4),
+            "Delta": round(new_score - old_score, 4)
+        })
+    
+    results_df = pd.DataFrame(benchmark_data)
+    
+    # Save the report
+    report_name = f"benchmark_report_{curr_date}.csv"
+    results_df.to_csv(BASE_DIR + "data/match_data/" + report_name, index=False)
+    
+    print(f"Benchmark Complete! Report saved to {report_name}")
+    print(results_df.to_string(index=False))
 
 REBUILD_DATSETS = True
 if REBUILD_DATSETS:
@@ -466,6 +527,9 @@ if REBUILD_DATSETS:
 
         data = list(zip(unique_ids, all_org_names, financial_datasets))
         org_name_df = pd.DataFrame(data, columns=['unique_id', 'org_name', 'financial_dataset'])
+        #temporary bottleneck
+        org_name_df = org_name_df.sample(n=min(5000, len(org_name_df))) 
+        print(f"Sampled reference data to {len(org_name_df)} rows for speed.")
         # org_name_df_lst = []
         # for source in sources:
         #     org_name_df_lst.append(org_name_df[org_name_df['financial_dataset']==source]['org_name'].apply(clean_fin_org_names))
@@ -522,7 +586,8 @@ df['organization'] = df['organization'].map(clean_fin_org_names)
 # replace none
 df.loc[df['submitter_name'].isna(), "submitter_name"] = ''
 
-key_names_list = df.iloc[:,:] # This DataFrame is now your list of organizations to match
+key_names_list = df.iloc[:,:] #list of organizations to match
+key_names_list = key_names_list.head(100) #only runs for 100 records FOR CHECKING CLEANING
 
 print("Finished cleaning with RData source.")
 
@@ -894,7 +959,7 @@ for row_idx in tqdm(range(len(org_name_df))):
     
     df = df[filter_condition].copy()
     
-    print(f"Filtered DataFrame down to {len(df)} records (0.80 < score < 0.90).")
+    print(f"Filtered DataFrame down to {len(df)} records (0.50 < score < 0.60).")
 
     #Add Exact Match column
     name_cols = list(filter(lambda x: "best_match_name" in x,df.columns))
@@ -926,3 +991,7 @@ for row_idx in tqdm(range(len(org_name_df))):
     final_filename = f"match_df_moderate_sample_{int(LOWER_BOUND*100)}_{int(UPPER_BOUND*100)}_" + curr_date + ".csv"
     df.to_csv(BASE_DIR + "data/match_data/" + final_filename, index=False)
     print(f"Saved moderate sample to: {final_filename}")
+
+pdf_path = BASE_DIR + "data/validation_df_20230707095816 - validation_df_20230707095816.pdf"
+
+run_pdf_benchmark(pdf_path, candidate_frequency_dict)
