@@ -409,8 +409,9 @@ if REBUILD_DATSETS:
     ## PART 1: Match records from the gathered organization datasets (FDIC, FFEIC, Nonprofits, CIK, Compustat, etc.) to scraped comments
 
     # 1.1: Read and clean org names from gathered org datasets
-    sources = ["FDIC_Institutions", "FFIECInstitutions", "CreditUnions", "CIK", "compustat_resources", "nonprofits_resources", "opensecrets_resources_jwVersion", "SEC_Institutions"]
-    # sources = ["FFIECInstitutions", "CIK"]
+    #sources = ["FDIC_Institutions", "FFIECInstitutions", "CreditUnions", "CIK", "compustat_resources", "nonprofits_resources", "opensecrets_resources_jwVersion", "SEC_Institutions"]
+    sources = ["FDIC_Institutions", "FFIECInstitutions", "CreditUnions", "CIK", "compustat_resources", "opensecrets_resources_jwVersion", "SEC_Institutions"]
+    #sources = ["FFIECInstitutions", "CIK"]
 
     org_name_dict = {}
     if True:
@@ -522,7 +523,7 @@ df['organization'] = df['organization'].map(clean_fin_org_names)
 # replace none
 df.loc[df['submitter_name'].isna(), "submitter_name"] = ''
 
-key_names_list = df.iloc[:,:] # This DataFrame is now your list of organizations to match
+key_names_list = df.iloc[:5000, :] # This DataFrame is now your list of organizations to match
 
 print("Finished cleaning with RData source.")
 
@@ -601,328 +602,438 @@ for row_idx in tqdm(range(len(org_name_df))):
         else:
             candidate_match_dict[token] = [(unique_id, org_name, original_org_name)]
                 
+#================
+#1.5.1 CASCADE MATCHING
+#=================
+match_dict = {}
+# indices to track which records still need matching
+remaining_indices = list(key_names_list.index)
 
-    # Apply linking dataset
-    # 1.5.1: For each org and submitter name in the scraped comment dataset, get all of the names ('candidate matches') from among the gathered org datasets that have the most important word of the scraped db names in the org's name. Calculate a tf-idf weighted jaccard index match score to choose the best matches among the candidates.
-    print('Generating match dictionary.')
-    match_dict = {}
-    print("Num scraped records: " + str(len(key_names_list)))
-    for key_name_idx in tqdm(range(len(key_names_list))):
-        key_name = key_names_list.iloc[key_name_idx]
-        org_name = key_name['organization']
+#Stage 1: EXACT MATCH
+print(f"Starting Stage 1: Exact Identity Matching on {len(remaining_indices)} records...")
 
-        if not org_name:
-            match_dict[org_name] = pd.DataFrame()
-            continue
+current_pool = key_names_list.loc[remaining_indices]
 
-        if org_name in match_dict:
-            continue
 
-        # Tokenize the submitter name and org name
-        org_tokens = org_name.split(" ")
-        
-        # Get the frequencies (in the scraped comment db) of the tokens in the submitter name and org name
-        # submitter_token_frequencies = sorted([(submitter_token, submitter_frequency_dict[submitter_token]) for submitter_token in submitter_tokens], key=lambda x: x[1])
-        org_token_frequencies = [(org_token, candidate_frequency_dict.get(org_token)) for org_token in org_tokens]
-        org_token_frequencies = list(filter(lambda item: item[1] is not None, org_token_frequencies))
-        org_token_frequencies = sorted(org_token_frequencies, key=lambda x: x[1])
-        
+tier1_matches = current_pool.reset_index().merge(
+    org_name_df[['org_name', 'unique_id', 'original_org_name']], 
+    left_on='organization', 
+    right_on='org_name', 
+    how='inner'
+)
 
-        candidate_matches = []
-        # Iterate through the candidate matches to the most informative token
-        for most_unique_org_token, _ in org_token_frequencies[:1]: # uses top 2 most unique tokens
-            if most_unique_org_token in candidate_match_dict:
-                for row in candidate_match_dict[most_unique_org_token]:
-                    unique_id = row[0]
-                    candidate_match_name = row[1]
-                    original_candidate_match_name = row[2]
-                    match_score = get_match_candidate_score(candidate_frequency_dict, org_name, candidate_match_name)
+# Populate match_dict for these high-confidence exact matches
+for _, row in tier1_matches.iterrows():
+    actual_col_name = 'original_org_name_y' if 'original_org_name_y' in row else 'original_org_name'
+    
+    if row['organization'] not in match_dict:
+        match_dict[row['organization']] = pd.DataFrame([{
+            'match_score': 1.0,
+            'candidate_match_name': row['org_name'],
+            'original_org_name': row[actual_col_name],
+            'unique_id': row['unique_id']
+        }])
+
+# Identify which original record indices were successfully matched
+matched_indices = set(tier1_matches['index'])
+remaining_indices = [i for i in remaining_indices if i not in matched_indices]
+
+print(f"Stage 1 complete. Found {len(matched_indices)} exact matches.")
+print(f"Remaining records for Stage 2: {len(remaining_indices)}")
+
+# Stage 2: FIRST-LETTER MATCHING
+print("Starting Stage 2: First-Letter Blocking for remaining records...")
+
+subset_to_match = key_names_list.loc[remaining_indices]
+
+for key_name_idx in tqdm(range(len(subset_to_match))):
+    key_name = subset_to_match.iloc[key_name_idx]
+    org_name = key_name['organization']
+
+    if not org_name:
+        match_dict[org_name] = pd.DataFrame()
+        continue
+    
+    if org_name in match_dict:
+        continue
+
+    first_char = org_name[0].upper() if org_name else ""
+
+    # Tokenize and compute frequencies
+    org_tokens = org_name.split(" ")
+    org_token_frequencies = [(org_token, candidate_frequency_dict.get(org_token)) for org_token in org_tokens]
+    org_token_frequencies = list(filter(lambda item: item[1] is not None, org_token_frequencies))
+    org_token_frequencies = sorted(org_token_frequencies, key=lambda x: x[1])
+    
+    candidate_matches = []
+
+    for most_unique_org_token, _ in org_token_frequencies[:1]: 
+        if most_unique_org_token in candidate_match_dict:
+            for row in candidate_match_dict[most_unique_org_token]:
+                unique_id = row[0]
+                candidate_match_name = row[1]
+                
+                # Apply the first-letter block
+                if not candidate_match_name.upper().startswith(first_char):
+                    continue
+                    
+                original_candidate_match_name = row[2]
+                match_score = get_match_candidate_score(candidate_frequency_dict, org_name, candidate_match_name)
+                candidate_matches.append((match_score, candidate_match_name, original_candidate_match_name, unique_id))
+
+    # Sort and store the results
+    if candidate_matches:
+        candidate_matches.sort(key=lambda x:(-x[0], abs(len(x[1].split(" ")) - len(org_tokens))))
+        match_dict[org_name] = pd.DataFrame(candidate_matches, columns=['match_score','candidate_match_name', 'original_org_name', 'unique_id'])
+
+
+# STAGE 3: REMAINING POOL
+
+remaining_after_t2 = [i for i in remaining_indices if key_names_list.loc[i, 'organization'] not in match_dict]
+
+print(f"\n>>> Starting Stage 3: Relaxed Fuzzy on {len(remaining_after_t2)} remaining records...")
+
+for idx in tqdm(remaining_after_t2):
+    key_name = key_names_list.loc[idx]
+    org_name = key_name['organization']
+
+    if not org_name or len(org_name) < 5:
+        continue
+
+    # Tokenize
+    org_tokens = org_name.split(" ")
+    org_token_frequencies = [(t, candidate_frequency_dict.get(t, 999999)) for t in org_tokens]
+    org_token_frequencies = sorted([f for f in org_token_frequencies if f[1] < 5000], key=lambda x: x[1])
+
+    candidate_matches = []
+    
+    # We use a slightly deeper search here (top 2 unique tokens) 
+    # and WE REMOVE THE FIRST_CHAR CHECK
+    for unique_token, _ in org_token_frequencies[:2]:
+        if unique_token in candidate_match_dict:
+            for row in candidate_match_dict[unique_token]:
+                unique_id = row[0]
+                candidate_match_name = row[1]
+                original_candidate_match_name = row[2]
+
+                
+                match_score = get_match_candidate_score(candidate_frequency_dict, org_name, candidate_match_name)
+                
+                # Use a high threshold (e.g., 0.85) to prevent "drift"
+                if match_score > 0.85:
                     candidate_matches.append((match_score, candidate_match_name, original_candidate_match_name, unique_id))
 
-        # Sort the candidate matches, first by the match score and then by the absolute value of the difference in the number of tokens between the submitter (or org) name and the candidate match org name
-        candidate_matches.sort(key=lambda x:(-x[0], abs(len(x[1].split(" ")) - len(org_tokens))))
-        candidate_matches = pd.DataFrame(candidate_matches, columns=['match_score','candidate_match_name', 'original_org_name', 'unique_id'])
-        #TODO: remove submitters
-        # candidate_matches_list.append([])
-        # candidate_matches_list.append(candidate_matches)
+    if candidate_matches:
+        candidate_matches.sort(key=lambda x: (-x[0], abs(len(x[1].split(" ")) - len(org_tokens))))
+        match_dict[org_name] = pd.DataFrame(candidate_matches, columns=['match_score', 'candidate_match_name', 'original_org_name', 'unique_id'])
+
+# FINAL CLEANUP: Ensure every record has a match entry
+print("Finalizing match dictionary for downstream processing...")
+all_unique_orgs = key_names_list['organization'].unique()
+
+for org_name in all_unique_orgs:
+    # If the name isn't in match_dict, it means all 3 tiers failed to find a match
+    if org_name not in match_dict:
+        # We give it an empty DataFrame so the rest of your script doesn't crash
+        match_dict[org_name] = pd.DataFrame(columns=['match_score', 'candidate_match_name', 'original_org_name', 'unique_id'])
+
+print(f"Total unique organizations in match_dict: {len(match_dict)}")
+
+# 1.5.2: Save the candidate matches and get record counts
+# with open(BASE_DIR + "data/finreg_jaccard_match_" + curr_date + ".pkl", 'wb') as pkl_out:
+#     pickle.dump(match_dict, pkl_out)
+
+print("Num scraped records: " + str(len(key_names_list)))
 
 
-        # Record the candidate matches corresponding to the current scraped comment record
-        match_dict[org_name] = candidate_matches
+# 1.6: Extract the scraped records with at least one candidate match and take the top top_matches_num (or all if there are < top_matches_num) matches from the scored candidate matches
+# DONE: loop until we get top match from each dataset
+threshold = 0.95
+counter = 0
+match_counter = 0
+good_matches = {}
+for elem_idx, elem in tqdm(list(enumerate(match_dict))):
+
+    # Org name
+    good_org_matches = []
+    collected_sources = set()
+    matches = match_dict[elem]
+
+    if len(matches) == 0:
+        counter += 1   
 
 
-    # 1.5.2: Save the candidate matches and get record counts
-    # with open(BASE_DIR + "data/finreg_jaccard_match_" + curr_date + ".pkl", 'wb') as pkl_out:
-    #     pickle.dump(match_dict, pkl_out)
+    if len(collected_sources) == len(sources):
+        break
 
-    print("Num scraped records: " + str(len(key_names_list)))
-
-
-    # 1.6: Extract the scraped records with at least one candidate match and take the top top_matches_num (or all if there are < top_matches_num) matches from the scored candidate matches
-    # DONE: loop until we get top match from each dataset
-    threshold = 0.95
-    counter = 0
-    match_counter = 0
-    good_matches = {}
-    for elem_idx, elem in tqdm(list(enumerate(match_dict))):
-
-        # Org name
-        good_org_matches = []
-        collected_sources = set()
-        matches = match_dict[elem]
-
-        if len(matches) == 0:
-            counter += 1   
-
-
+    for match_candidate_idx in range(len(matches)):
+        match_candidate = matches.iloc[match_candidate_idx]
         if len(collected_sources) == len(sources):
             break
+        match_candidate_source = match_candidate['unique_id'].split('-')[0]
+        if not match_candidate_source in collected_sources:
+            good_org_matches.append(match_candidate)
+            collected_sources.add(match_candidate_source)
 
-        for match_candidate_idx in range(len(matches)):
-            match_candidate = matches.iloc[match_candidate_idx]
-            if len(collected_sources) == len(sources):
-                break
-            match_candidate_source = match_candidate['unique_id'].split('-')[0]
-            if not match_candidate_source in collected_sources:
-                good_org_matches.append(match_candidate)
-                collected_sources.add(match_candidate_source)
-
-        good_matches[elem] = good_org_matches
-            
-    print("Num records in match_dict: " + str(len(match_dict)))
-    print("Num records without a match: " + str(counter))
-    print("Share of records that weren't matchable: " + str(counter / len(match_dict)))
-
-
-    ## PART 2: Attempt to estimate whether comment was submitted by a person or an organization
-    nlp = en_core_web_lg.load()
-
-    # 2.1: Among the matchable scraped comment records, use spacy's ner tagger to tag the tokens in the submitter name and org name of each record. 
-    good_matches_org_tagged = {}
-    num_likely_orgs = 0
-    for elem_idx, elem in tqdm(list(key_names_list.iterrows())):
-        # Consider an org name to likely be a person if the submitter's name isn't empty and if at least one of its tokens gets tagged as corresponding to a person
-        tagged_org_name = []
-        likely_org_check = 1
-        if elem['organization'] is not None:
-            tagged_org_name = nlp(elem['organization'])
-            if "PERSON" in [tag.label_ for tag in tagged_org_name.ents]:
-                likely_org_check = 0
-
-        # Default to considering a record to have been submitted by an org
-        likely_org = 1
-        # BUT, consider the record to have been submitted by a person if the name fields aren't empty and at least one token of each name field was tagged as a person
-        if elem['submitter_name'] is not None and elem['organization'] is not None and elem['submitter_name'] != "" and elem['organization'] != "" and likely_org_check == 0:
-            likely_org = 0
-        # Also consider the record to have been submitted by a person if only one of the name fields was empty and the other had at least one token of each name field was tagged as a person
-        if (elem['submitter_name'] is None or elem['submitter_name'] == "") and (elem['organization'] is not None and elem['organization'] != "") and likely_org_check == 0:
-            likely_org = 0
-        # (Same as above case but switching which name was empty)
-        if (elem['organization'] is None or elem['organization'] == "") and (elem['submitter_name'] is not None and elem['submitter_name'] != ""):
-            likely_org = 0        
-        # Also consider the record to have been submitted by a person if the submitter name field has "anonymous anonymous" in it and the org name field is empty
-        if "anonymous anonymous" in elem['submitter_name'] and (elem['organization'] is None or elem['organization'] == ""):
-            likely_org = 0
-            
-        num_likely_orgs += likely_org
+    good_matches[elem] = good_org_matches
         
-        good_matches_org_tagged[tuple(elem.values)] = (good_matches[elem['organization']], (likely_org, [X.label_ for X in tagged_org_name.ents]))
+print("Num records in match_dict: " + str(len(match_dict)))
+print("Num records without a match: " + str(counter))
+print("Share of records that weren't matchable: " + str(counter / len(match_dict)))
+
+
+## PART 2: Attempt to estimate whether comment was submitted by a person or an organization
+nlp = en_core_web_lg.load()
+
+# 2.1: Among the matchable scraped comment records, use spacy's ner tagger to tag the tokens in the submitter name and org name of each record. 
+good_matches_org_tagged = {}
+num_likely_orgs = 0
+for elem_idx, elem in tqdm(list(key_names_list.iterrows())):
+    # Consider an org name to likely be a person if the submitter's name isn't empty and if at least one of its tokens gets tagged as corresponding to a person
+    tagged_org_name = []
+    likely_org_check = 1
+    if elem['organization'] is not None:
+        tagged_org_name = nlp(elem['organization'])
+        if "PERSON" in [tag.label_ for tag in tagged_org_name.ents]:
+            likely_org_check = 0
+
+    # Default to considering a record to have been submitted by an org
+    likely_org = 1
+    # BUT, consider the record to have been submitted by a person if the name fields aren't empty and at least one token of each name field was tagged as a person
+    if elem['submitter_name'] is not None and elem['organization'] is not None and elem['submitter_name'] != "" and elem['organization'] != "" and likely_org_check == 0:
+        likely_org = 0
+    # Also consider the record to have been submitted by a person if only one of the name fields was empty and the other had at least one token of each name field was tagged as a person
+    if (elem['submitter_name'] is None or elem['submitter_name'] == "") and (elem['organization'] is not None and elem['organization'] != "") and likely_org_check == 0:
+        likely_org = 0
+    # (Same as above case but switching which name was empty)
+    if (elem['organization'] is None or elem['organization'] == "") and (elem['submitter_name'] is not None and elem['submitter_name'] != ""):
+        likely_org = 0        
+    # Also consider the record to have been submitted by a person if the submitter name field has "anonymous anonymous" in it and the org name field is empty
+    if "anonymous anonymous" in elem['submitter_name'] and (elem['organization'] is None or elem['organization'] == ""):
+        likely_org = 0
         
-        
-
-    ## PART 3: Create a data from to explore commenter covariates
-    covariate_dfs = get_covariate_dfs()
-
-    # 3.2: Make a dataframe organizing the covariates of the gathered datasets
-    covariate_dict = {}
-    frs_counter = 0
-    for elem_idx, elem in tqdm(list(key_names_list.iterrows())):
-        elem = tuple(elem)
-        url = elem[0]
-        submitter_name = elem[1]
-        org_name = elem[2]
-        agency_acronym = elem[3]
-        if agency_acronym == "FRS":
-            frs_counter += 1
-        docket_id = elem[4]
-        comment_title = elem[5]
-        original_org_name = elem[6]
-
-        matches = good_matches_org_tagged[elem][0]
-        tag_data = good_matches_org_tagged[elem][1]
-        is_likely_org = tag_data[0]
-        org_tags = tag_data
-
-        
-        org_match_covariate_dict = {}
-        org_match_type = ""
-        org_best_match_score = np.nan
-
-        org_matches_collected = []
-        org_types_collected = []
-        if len(matches) > 0:
-            for match in matches:
-                org_best_match = match
-                org_best_match_id = org_best_match['unique_id']
-                org_match_type = org_best_match_id.split("-")[0]
-                if not org_match_type in org_types_collected:
-                    org_matches_collected.append(match)
-                    org_types_collected.append(org_match_type)
-
-            for org_match in org_matches_collected:
-                org_best_match = org_match
-                org_best_match_id = org_best_match['unique_id']
-                org_best_match_name = org_best_match['candidate_match_name']
-                original_best_match_name = org_best_match['original_org_name']
-                org_best_match_score = clean_match_score(org_best_match['match_score'])
-                if pd.isnull(org_best_match_score):
-                    print("this shouldn't be null")
-                org_match_type = org_best_match_id.split("-")[0]
-                org_match_row_num = org_best_match_id.split("-")[1]
-                org_match_covariate_dict.update(get_data_row(org_match_type, int(org_match_row_num), "orgMatch"))
-                org_match_covariate_dict[org_match_type + '-orgMatch' + ":best_match_score"] = org_best_match_score
-                org_match_covariate_dict[org_match_type + '-orgMatch' + ":best_match_name"] = org_best_match_name
-                org_match_covariate_dict[org_match_type + '-orgMatch' + ":original_match_name"] = original_best_match_name
-
-        
-        covariate_dict[elem] = {**org_match_covariate_dict}
-        covariate_dict[elem]['original_org_name'] = original_org_name
-        covariate_dict[elem]['comment_url'] = url
-        covariate_dict[elem]['comment_submitter_name'] = submitter_name
-        covariate_dict[elem]['comment_org_name'] = org_name
-        covariate_dict[elem]['comment_agency'] = agency_acronym
-        covariate_dict[elem]['docket_id'] = docket_id
-        covariate_dict[elem]['is_likely_org'] = is_likely_org
-        covariate_dict[elem]['org_tags'] = str(org_tags)
-        covariate_dict[elem]['org_match_type'] = org_match_type
-        covariate_dict[elem]['org_best_match_score'] = org_best_match_score  
-
-        covariate_dict[elem]['num_org_matches'] = len(org_matches_collected)
-
-
-    print("FRS counter: " + str(frs_counter))
-    print("Finished creating data dicts")
-
-    variables = set()
-    for elem_idx, elem in tqdm(enumerate(covariate_dict)):
-        variables = variables.union(set(covariate_dict[elem].keys()))
-    variables = list(variables)
-    variables.sort()
-    print("Finished establishing variables")
-
-    data = []
-    for elem_idx, elem in tqdm(enumerate(covariate_dict)):
-        elem_data_dict = covariate_dict[elem]
-        elem_data_row = [None]*len(variables)
-        for var_idx, variable in enumerate(variables):
-            if variable in elem_data_dict:
-                elem_data_row[var_idx] = elem_data_dict[variable]
-        data.append(elem_data_row)
-        # if elem_idx % 10000 == 0:
-        #     print(elem_idx)
-    print("Finished creating items for df")
-
-    covariate_df = pd.DataFrame(data, columns=variables)
-
-    # 3.3: Save the dataframe of scraped records with attached covariates
-
-    # filter columns
-    common_tails = ['best_match_name',
-                    'original_match_name', 
-                    'best_match_score', 
-                    'CIK', 
-                    'CU_NUMBER', 
-                    'RSSD', 
-                    'CERT', 
-                    'FED_RSSD',
-                    'FDIC Certificate Number',
-                    'IDRSSD',
-                    'OCC Charter Number',
-                    'SIC',
-                    'Ticker',
-                    'cik',
-                    'cusip',
-                    'gvkey',
-                    'naics',
-                    'sic',
-                    'tic',
-                    'ein',
-                    'name',
-                    'parentID'
-                    ]
-    important_cols = ['original_org_name',
-                      'num_org_matches', 
-                      'num_submitter_matches', 
-                      'comment_agency',
-                      'comment_org_name',
-                      'comment_submitter_name',
-                      'docket_id',
-                      'comment_url',]
-    important_cols = [x for x in covariate_df.columns if (x.split(':')[-1] in common_tails) or (x in important_cols)]
-    covariate_df= covariate_df[important_cols]
-
-    # reorder columns
-    cols = covariate_df.columns
-    cols = [x for x in cols if not ':' in x] + [x for x in cols if ':' in x]
-    covariate_df= covariate_df[cols]
-
-    # write df
-    with open(BASE_DIR + "data/finreg_commenter_covariates_df_" + curr_date + ".pkl", 'wb') as pkl_out:
-        pickle.dump(covariate_df, pkl_out)
-
-    covariate_df.to_csv(BASE_DIR + "data/finreg_commenter_covariates_df_" + curr_date + ".csv")
-
-    df = covariate_df
-    df = df[list(filter(lambda x: not "submitter" in x,df.columns))]
-    # df = df[df['comment_org_name']!='']
-    df.to_csv(BASE_DIR + "data/match_data/match_all_covariates_df_" + curr_date + ".csv")
-
-    df = pd.read_csv(BASE_DIR + "data/match_data/match_all_covariates_df_" + curr_date + ".csv")
-    df = df.drop("Unnamed: 0", axis=1)
-
-    #isolating low scores
-    score_cols = [col for col in df.columns if "best_match_score" in col]
-    df['max_match_score'] = df[score_cols].fillna(-100).max(axis = 1)
-   
-    LOWER_BOUND = 0.50
-    UPPER_BOUND = 0.60
+    num_likely_orgs += likely_org
     
-    # Filter for scores in the moderate range and ensures the score is positive
-    filter_condition = (df['max_match_score'] > LOWER_BOUND) & \
-                       (df['max_match_score'] < UPPER_BOUND) & \
-                       (df['max_match_score'] > 0)
+    good_matches_org_tagged[tuple(elem.values)] = (good_matches[elem['organization']], (likely_org, [X.label_ for X in tagged_org_name.ents]))
     
-    df = df[filter_condition].copy()
     
-    print(f"Filtered DataFrame down to {len(df)} records (0.80 < score < 0.90).")
 
-    #Add Exact Match column
-    name_cols = list(filter(lambda x: "best_match_name" in x,df.columns))
-    exact_matches = pd.DataFrame()
-    for name_col in name_cols:
-        exact_matches[name_col] = df[name_col]==df['comment_org_name']
+## PART 3: Create a data from to explore commenter covariates
+covariate_dfs = get_covariate_dfs()
 
-    new_col = (exact_matches.sum(axis=1)>0).astype(int)
-    df['exact_match_present'] = new_col
+# 3.2: Make a dataframe organizing the covariates of the gathered datasets
+covariate_dict = {}
+frs_counter = 0
+for elem_idx, elem in tqdm(list(key_names_list.iterrows())):
+    elem = tuple(elem)
+    url = elem[0]
+    submitter_name = elem[1]
+    org_name = elem[2]
+    agency_acronym = elem[3]
+    if agency_acronym == "FRS":
+        frs_counter += 1
+    docket_id = elem[4]
+    comment_title = elem[5]
+    original_org_name = elem[6]
+
+    matches = good_matches_org_tagged[elem][0]
+    tag_data = good_matches_org_tagged[elem][1]
+    is_likely_org = tag_data[0]
+    org_tags = tag_data
+
     
-    #Reorder columns (Adjusted to include 'max_match_score' in the front)
-    cols = list(df.columns)
-    front = [
-        'comment_agency',
-        'original_org_name',
-        'comment_url',
-        'docket_id',
-        'comment_org_name',
-        'num_org_matches',
-        'exact_match_present',
-        'max_match_score', 
-        ]
+    org_match_covariate_dict = {}
+    org_match_type = ""
+    org_best_match_score = np.nan
+
+    org_matches_collected = []
+    org_types_collected = []
+    if len(matches) > 0:
+        for match in matches:
+            org_best_match = match
+            org_best_match_id = org_best_match['unique_id']
+            org_match_type = org_best_match_id.split("-")[0]
+            if not org_match_type in org_types_collected:
+                org_matches_collected.append(match)
+                org_types_collected.append(org_match_type)
+
+        for org_match in org_matches_collected:
+            org_best_match = org_match
+            org_best_match_id = org_best_match['unique_id']
+            org_best_match_name = org_best_match['candidate_match_name']
+            original_best_match_name = org_best_match['original_org_name']
+            org_best_match_score = clean_match_score(org_best_match['match_score'])
+            if pd.isnull(org_best_match_score):
+                print("this shouldn't be null")
+            org_match_type = org_best_match_id.split("-")[0]
+            org_match_row_num = org_best_match_id.split("-")[1]
+            org_match_covariate_dict.update(get_data_row(org_match_type, int(org_match_row_num), "orgMatch"))
+            org_match_covariate_dict[org_match_type + '-orgMatch' + ":best_match_score"] = org_best_match_score
+            org_match_covariate_dict[org_match_type + '-orgMatch' + ":best_match_name"] = org_best_match_name
+            org_match_covariate_dict[org_match_type + '-orgMatch' + ":original_match_name"] = original_best_match_name
+
     
-    # Recreate the final column list by ensuring the front columns are first
-    remaining_cols = [c for c in cols if c not in front]
-    df = df[front + remaining_cols]
+    covariate_dict[elem] = {**org_match_covariate_dict}
+    covariate_dict[elem]['original_org_name'] = original_org_name
+    covariate_dict[elem]['comment_url'] = url
+    covariate_dict[elem]['comment_submitter_name'] = submitter_name
+    covariate_dict[elem]['comment_org_name'] = org_name
+    covariate_dict[elem]['comment_agency'] = agency_acronym
+    covariate_dict[elem]['docket_id'] = docket_id
+    covariate_dict[elem]['is_likely_org'] = is_likely_org
+    covariate_dict[elem]['org_tags'] = str(org_tags)
+    covariate_dict[elem]['org_match_type'] = org_match_type
+    covariate_dict[elem]['org_best_match_score'] = org_best_match_score  
+
+    covariate_dict[elem]['num_org_matches'] = len(org_matches_collected)
 
 
-    final_filename = f"match_df_moderate_sample_{int(LOWER_BOUND*100)}_{int(UPPER_BOUND*100)}_" + curr_date + ".csv"
-    df.to_csv(BASE_DIR + "data/match_data/" + final_filename, index=False)
-    print(f"Saved moderate sample to: {final_filename}")
+print("FRS counter: " + str(frs_counter))
+print("Finished creating data dicts")
+
+variables = set()
+for elem_idx, elem in tqdm(enumerate(covariate_dict)):
+    variables = variables.union(set(covariate_dict[elem].keys()))
+variables = list(variables)
+variables.sort()
+print("Finished establishing variables")
+
+data = []
+for elem_idx, elem in tqdm(enumerate(covariate_dict)):
+    elem_data_dict = covariate_dict[elem]
+    elem_data_row = [None]*len(variables)
+    for var_idx, variable in enumerate(variables):
+        if variable in elem_data_dict:
+            elem_data_row[var_idx] = elem_data_dict[variable]
+    data.append(elem_data_row)
+    # if elem_idx % 10000 == 0:
+    #     print(elem_idx)
+print("Finished creating items for df")
+
+covariate_df = pd.DataFrame(data, columns=variables)
+
+# 3.3: Save the dataframe of scraped records with attached covariates
+
+# filter columns
+common_tails = ['best_match_name',
+                'original_match_name', 
+                'best_match_score', 
+                'CIK', 
+                'CU_NUMBER', 
+                'RSSD', 
+                'CERT', 
+                'FED_RSSD',
+                'FDIC Certificate Number',
+                'IDRSSD',
+                'OCC Charter Number',
+                'SIC',
+                'Ticker',
+                'cik',
+                'cusip',
+                'gvkey',
+                'naics',
+                'sic',
+                'tic',
+                'ein',
+                'name',
+                'parentID'
+                ]
+important_cols = ['original_org_name',
+                    'num_org_matches', 
+                    'num_submitter_matches', 
+                    'comment_agency',
+                    'comment_org_name',
+                    'comment_submitter_name',
+                    'docket_id',
+                    'comment_url',]
+important_cols = [x for x in covariate_df.columns if (x.split(':')[-1] in common_tails) or (x in important_cols)]
+covariate_df= covariate_df[important_cols]
+
+# reorder columns
+cols = covariate_df.columns
+cols = [x for x in cols if not ':' in x] + [x for x in cols if ':' in x]
+covariate_df= covariate_df[cols]
+
+# write df
+with open(BASE_DIR + "data/finreg_commenter_covariates_df_" + curr_date + ".pkl", 'wb') as pkl_out:
+    pickle.dump(covariate_df, pkl_out)
+
+covariate_df.to_csv(BASE_DIR + "data/finreg_commenter_covariates_df_" + curr_date + ".csv")
+
+df = covariate_df
+df = df[list(filter(lambda x: not "submitter" in x,df.columns))]
+# df = df[df['comment_org_name']!='']
+df.to_csv(BASE_DIR + "data/match_data/match_all_covariates_df_" + curr_date + ".csv")
+
+df = pd.read_csv(BASE_DIR + "data/match_data/match_all_covariates_df_" + curr_date + ".csv")
+df = df.drop("Unnamed: 0", axis=1)
+
+#isolating low scores
+score_cols = [col for col in df.columns if "best_match_score" in col]
+df['max_match_score'] = df[score_cols].fillna(-100).max(axis = 1)
+
+LOWER_BOUND = 0.50
+UPPER_BOUND = 0.60
+
+# Filter for scores in the moderate range and ensures the score is positive
+filter_condition = (df['max_match_score'] > LOWER_BOUND) & \
+                    (df['max_match_score'] < UPPER_BOUND) & \
+                    (df['max_match_score'] > 0)
+
+df = df[filter_condition].copy()
+
+print(f"Filtered DataFrame down to {len(df)} records ( {LOWER_BOUND} < score < {UPPER_BOUND}).")
+
+#Add Exact Match column
+name_cols = list(filter(lambda x: "best_match_name" in x,df.columns))
+exact_matches = pd.DataFrame()
+for name_col in name_cols:
+    exact_matches[name_col] = df[name_col]==df['comment_org_name']
+
+new_col = (exact_matches.sum(axis=1)>0).astype(int)
+df['exact_match_present'] = new_col
+
+#Reorder columns (Adjusted to include 'max_match_score' in the front)
+cols = list(df.columns)
+front = [
+    'comment_agency',
+    'original_org_name',
+    'comment_url',
+    'docket_id',
+
+    'comment_org_name',
+    'num_org_matches',
+    'exact_match_present',
+    'max_match_score', 
+    ]
+
+# Recreate the final column list by ensuring the front columns are first
+remaining_cols = [c for c in cols if c not in front]
+df = df[front + remaining_cols]
+
+
+final_filename = f"match_df_moderate_sample_{int(LOWER_BOUND*100)}_{int(UPPER_BOUND*100)}_" + curr_date + ".csv"
+df.to_csv(BASE_DIR + "data/match_data/" + final_filename, index=False)
+print(f"Saved moderate sample to: {final_filename}")
+
+print("Running automated accuracy check...")
+try:
+    hand_df = pd.read_csv(BASE_DIR + "data/hand_match.csv") 
+    
+    # 2. Compare them to the current script's results
+    # We match them up based on the 'original_org_name'
+    comparison = df.merge(hand_df, on='original_org_name', suffixes=('_script', '_hand'))
+    
+    if not comparison.empty:
+        comparison['match_correct'] = comparison['comment_org_name'] == comparison['hand_match_name']
+    
+        # 4. Show the results
+        accuracy = comparison['match_correct'].mean()
+        print(f"Analysis Complete! Your script matched {accuracy:.1%} of names correctly.")
+    
+        # 5. Save this as your 'Results' table
+        comparison.to_csv(BASE_DIR + "data/accuracy_comparison_report.csv", index=False)
+    else:
+        print("No overlapping records found between script results and hand matches.")
+except Exception as e:
+    print(f"Could not run evaluation: {e}. Make sure 'hand_validates_matches.csv' exists.")
