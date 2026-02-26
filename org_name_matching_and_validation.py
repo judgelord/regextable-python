@@ -1037,14 +1037,23 @@ score_cols = [col for col in df.columns if "best_match_score" in col]
 #print(f"Filtered DataFrame down to {len(df)} records ( {LOWER_BOUND} < score < {UPPER_BOUND}).")
 
 #Add Exact Match column
-name_cols = list(filter(lambda x: "best_match_name" in x,df.columns))
-exact_matches = pd.DataFrame()
-for name_col in name_cols:
-    exact_matches[name_col] = df[name_col]==df['comment_org_name']
+df['exact_match_present'] = (df['matched_official_name'].astype(str).str.lower().str.strip() == df['original_org_name'].astype(str).str.lower().str.strip()).astype(int)
 
-new_col = (exact_matches.sum(axis=1)>0).astype(int)
-df['exact_match_present'] = new_col
+#Sort into folders:
+import os
+organized_base_dir = os.path.join(BASE_DIR, "data", "match_data", "by_agency")
 
+for agency_name, group_df in df.groupby('comment_agency'):
+    # Clean the agency name for folder path safety
+    folder_name = "".join([c if c.isalnum() else "_" for c in str(agency_name)])
+    target_path = os.path.join(organized_base_dir, folder_name)
+    
+    os.makedirs(target_path, exist_ok=True)
+    
+    file_path = os.path.join(target_path, f"matches_{folder_name}_{curr_date}.csv")
+    group_df.to_csv(file_path, index=False)
+
+print(f"Organized files successfully saved to: {organized_base_dir}")
 
 
 #final_filename = f"match_df_moderate_sample_{int(LOWER_BOUND*100)}_{int(UPPER_BOUND*100)}_" + curr_date + ".csv"
@@ -1070,7 +1079,7 @@ try:
         hand_col = 'hand_match' 
         
         # matches FDIC?
-        script_col = 'FDIC_Institutions-orgMatch:best_match_name'
+        script_col = 'match_official_name'
         
         if script_col in comparison.columns and hand_col in comparison.columns:
             # Clean strings to avoid mismatches due to casing or whitespace
@@ -1108,9 +1117,7 @@ def save_tier_to_csv(name_list, filename):
     if results:
         pd.DataFrame(results).to_csv(filename, index=False)
         print(f"Saved {len(results)} rows to {filename}")
-    else:
-        print(f"No matches found for {filename}, skipping save.")
-
+    
 # Execute the saves
 save_tier_to_csv(names_matched_in_1, "matches_tier1_exact.csv")
 save_tier_to_csv(remaining_names, "matches_fuzzy_attempts.csv")
