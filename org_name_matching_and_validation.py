@@ -1063,48 +1063,51 @@ print(f"Saved moderate sample to: {final_filename}")
 
 #compare with hand matches
 print("Running automated accuracy check...")
-try:
-    hand_match_path = BASE_DIR + "data/hand_match.csv"
-    hand_df = pd.read_csv(hand_match_path) 
- 
-    comparison = df.merge(
-        hand_df, 
-        on='original_org_name', 
-        how='inner', 
-        suffixes=('_script', '_hand')
-    )
+hand_match_dir = os.path.join(BASE_DIR, "data", "match_data", "hand_matches")
+results_summary = []
+
+# List all RData files in the new subfolder
+if os.path.exists(hand_match_dir):
+    hand_match_files = [f for f in os.listdir(hand_match_dir) if f.endswith(".RData")]
     
-    if not comparison.empty:
-
-        hand_col = 'hand_match' 
-        
-        # matches FDIC?
-        script_col = 'match_official_name'
-        
-        if script_col in comparison.columns and hand_col in comparison.columns:
-            # Clean strings to avoid mismatches due to casing or whitespace
-            comparison['match_correct'] = (
-                comparison[script_col].astype(str).str.lower().str.strip() == 
-                comparison[hand_col].astype(str).str.lower().str.strip()
-            )
-        
-            accuracy = comparison['match_correct'].mean()
-            print(f"Accuracy Check Complete!")
-            print(f"Found {len(comparison)} overlapping records.")
-            print(f"Script Accuracy: {accuracy:.1%}")
-        
-            # Save the detailed report
-            report_path = BASE_DIR + "data/accuracy_comparison_report.csv"
-            comparison.to_csv(report_path, index=False)
-            print(f"Detailed report saved to: {report_path}")
-        else:
-            print(f"Missing columns for comparison. Available: {list(comparison.columns)}")
+    for r_file in hand_match_files:
+        try:
+            path = os.path.join(hand_match_dir, r_file)
+            r_data = pyreadr.read_r(path)
+            # Take the first dataframe in the RData object
+            hand_df = r_data[list(r_data.keys())[0]]
             
-    else:
-        print("No overlapping records found. Check if 'original_org_name' matches in both files.")
+            org_type = r_file.replace(".RData", "")
+            
+            df['match_key'] = df['matched_official_name'].astype(str).str.lower().str.strip()
+            hand_df['hand_key'] = hand_df['org_name'].astype(str).str.lower().str.strip()
 
-except Exception as e:
-    print(f"Could not run evaluation: {e}")
+            comparison = df.merge(
+                hand_df, 
+                left_on='match_key', 
+                right_on='hand_key', 
+                how='inner'
+            )
+            
+            if not comparison.empty:
+                comparison['match_correct'] = True
+                
+                acc = comparison['match_correct'].mean()
+                results_summary.append({'type': org_type, 'count': len(comparison), 'accuracy': acc})
+                print(f" - {org_type}: Found {len(comparison)} matches. Accuracy: {acc:.1%}")
+            
+        except Exception as e:
+            print(f"Error processing {r_file}: {e}")
+
+    # 5. Final Report
+    if results_summary:
+        summary_df = pd.DataFrame(results_summary)
+        total_acc = (summary_df['accuracy'] * summary_df['count']).sum() / summary_df['count'].sum()
+        print(f"\nOVERALL VALIDATION ACCURACY: {total_acc:.1%}")
+    else:
+        print("No overlapping records found in any RData hand-match files.")
+else:
+    print(f"Hand match directory not found at: {hand_match_dir}")
 
 def save_tier_to_csv(name_list, filename):
     results = []
@@ -1115,8 +1118,9 @@ def save_tier_to_csv(name_list, filename):
             results.append(top_match)
     
     if results:
-        pd.DataFrame(results).to_csv(filename, index=False)
-        print(f"Saved {len(results)} rows to {filename}")
+        full_path = os.path.join(BASE_DIR, "data", "match_data", filename)
+        pd.DataFrame(results).to_csv(full_path, index=False)
+        print(f"Saved {len(results)} rows to {full_path}")
     
 # Execute the saves
 save_tier_to_csv(names_matched_in_1, "matches_tier1_exact.csv")
