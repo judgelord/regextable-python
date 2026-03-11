@@ -416,64 +416,62 @@ if REBUILD_DATSETS:
 
     org_name_dict = {}
     if True:
-        financial_datasets = []
-        unique_ids = []
-        all_org_names = []
+        financial_datasets_list = []
+        unique_ids_list = []
+        all_org_names_list = []
+
         for financial_dataset in sources:
+            # 1. SETUP FOLDERS AND COLUMN NAMES
             intermediate_data_folder = "data/"
-            col_name = ""
-            read_from_file = False
-            if financial_dataset == "FDIC_Institutions":
+            if financial_dataset in ["FDIC_Institutions", "FFIECInstitutions", "CIK", "compustat_resources", "opensecrets_resources_jwVersion", "SEC_Institutions"]:
                 intermediate_data_folder = "data/merged_resources/"
-                col_name = "NAME"
-                read_from_file = True
-            elif financial_dataset == "FFIECInstitutions":
-                intermediate_data_folder = "data/merged_resources/"
-                col_name = "Financial Institution Name"
-                read_from_file = True
-            elif financial_dataset == "CreditUnions":
-                col_name = "CU_NAME"
-                read_from_file = True
-            elif financial_dataset == "CIK":
-                intermediate_data_folder = "data/merged_resources/"
-                col_name = "company_name"#"COMPANYNAME"
-                read_from_file = True
-            elif financial_dataset == "compustat_resources":
-                intermediate_data_folder = "data/merged_resources/"
-                col_name = "conm"
-                read_from_file = True
-            elif financial_dataset == "nonprofits_resources":
-                intermediate_data_folder = "data/merged_resources/"
-                col_name = "name"
-                read_from_file = True
-            elif financial_dataset == "opensecrets_resources_jwVersion":
-                intermediate_data_folder = "data/merged_resources/"
-                col_name = "orgName"
-                read_from_file = True
-            elif financial_dataset == "SEC_Institutions":
-                intermediate_data_folder = "data/merged_resources/"
-                col_name = "Name"
-                read_from_file = True
+            
+            # Map the specific Name and ID columns for each source
+            col_map = {
+                "CIK": {"name": "company_name", "id": "cik"},
+                "SEC_Institutions": {"name": "Name", "id": "CIK"},
+                "FDIC_Institutions": {"name": "NAME", "id": "CERT"},
+                "FFIECInstitutions": {"name": "Financial Institution Name", "id": "RSSD"},
+                "CreditUnions": {"name": "CU_NAME", "id": "Charter"},
+                "compustat_resources": {"name": "conm", "id": "cik"},
+                "opensecrets_resources_jwVersion": {"name": "orgName", "id": None}
+            }
+            
+            config = col_map.get(financial_dataset, {"name": "org_name", "id": None})
+            col_name = config["name"]
+            id_col = config["id"]
 
-            print(financial_dataset)
+            # 2. LOAD DATA
+            file_path = BASE_DIR + intermediate_data_folder + financial_dataset + ".csv"
+            print(f"Loading {financial_dataset}...")
+            
             if financial_dataset == "opensecrets_resources_jwVersion":
-                df = pd.read_csv(BASE_DIR + intermediate_data_folder + financial_dataset + ".csv", quotechar='"')
+                df_temp = pd.read_csv(file_path, quotechar='"')
             else:
-                df = pd.read_csv(BASE_DIR + intermediate_data_folder + financial_dataset + ".csv")
-            df['unique_id'] = financial_dataset + "-" + df.index.astype(str)
-            df['financial_dataset'] = financial_dataset
-            financial_datasets = financial_datasets + list(df['unique_id'])
-            unique_ids = unique_ids + list(df['unique_id'])
-            all_org_names = all_org_names + list(df[col_name])
+                df_temp = pd.read_csv(file_path)
 
-        data = list(zip(unique_ids, all_org_names, financial_datasets))
+            # 3. GENERATE UNIQUE ID (Fixing the Shift & Float issue)
+            if id_col and id_col in df_temp.columns:
+                # Convert to numeric, then to Int (removes .0), then to string
+                # We use 'Int64' (capital I) to allow for NaNs without reverting to floats
+                clean_ids = pd.to_numeric(df_temp[id_col], errors='coerce').fillna(0).astype(int).astype(str)
+                df_temp['unique_id'] = financial_dataset + "-" + clean_ids
+            else:
+                # Fallback to index if no ID column exists or is found
+                df_temp['unique_id'] = financial_dataset + "-" + df_temp.index.astype(str)
+
+            # 4. APPEND TO MASTER LISTS
+            unique_ids_list.extend(df_temp['unique_id'].tolist())
+            all_org_names_list.extend(df_temp[col_name].fillna("").tolist())
+            financial_datasets_list.extend([financial_dataset] * len(df_temp))
+        data = list(zip(unique_ids_list, all_org_names_list, financial_datasets_list))
         org_name_df = pd.DataFrame(data, columns=['unique_id', 'org_name', 'financial_dataset'])
-        # org_name_df_lst = []
-        # for source in sources:
-        #     org_name_df_lst.append(org_name_df[org_name_df['financial_dataset']==source]['org_name'].apply(clean_fin_org_names))
+        
+        # Add the original name column for reference and clean the matching column
+        org_name_df = org_name_df[org_name_df['unique_id'] != "CIK-0"]
         org_name_df['original_org_name'] = org_name_df['org_name']
         org_name_df['org_name'] = org_name_df['org_name'].apply(clean_fin_org_names)
-
+ 
 
     rdata_path = BASE_DIR + "data/org_counts.RData"
 
@@ -1079,13 +1077,22 @@ if os.path.exists(hand_match_dir):
             
             org_type = r_file.replace(".RData", "")
             
-            df['match_key'] = df['matched_official_name'].astype(str).str.lower().str.strip()
-            hand_df['hand_key'] = hand_df['org_name'].astype(str).str.lower().str.strip()
+            df['cik'] = df['cik'].astype(str).str.zfill(10)
+            hand_df['cik'] = hand_df['cik'].astype(str).str.zfill(10)
+
+            # --- DIAGNOSTIC BLOCK ---
+            print(f"DEBUG: Processing {r_file}")
+            print(f"Sample DF CIKs: {df['cik'].head(3).tolist()}")
+            print(f"Sample Hand_DF CIKs: {hand_df['cik'].head(3).tolist()}")
+            print(f"DF types: {df['cik'].dtype}, Hand_DF types: {hand_df['cik'].dtype}")
+            # Check if there is even ONE common CIK
+            common = set(df['cik']).intersection(set(hand_df['cik']))
+            print(f"DEBUG: Found {len(common)} exact overlapping CIK strings.")
+# ------------------------
 
             comparison = df.merge(
                 hand_df, 
-                left_on='match_key', 
-                right_on='hand_key', 
+                on='cik',
                 how='inner'
             )
             
