@@ -1077,13 +1077,22 @@ if os.path.exists(hand_match_dir):
             
             org_type = r_file.replace(".RData", "")
             
-            df['match_key'] = df['matched_official_name'].astype(str).str.lower().str.strip()
-            hand_df['hand_key'] = hand_df['org_name'].astype(str).str.lower().str.strip()
+            df['cik'] = df['cik'].astype(str).str.zfill(10)
+            hand_df['cik'] = hand_df['cik'].astype(str).str.zfill(10)
+
+            # --- DIAGNOSTIC BLOCK ---
+            print(f"DEBUG: Processing {r_file}")
+            print(f"Sample DF CIKs: {df['cik'].head(3).tolist()}")
+            print(f"Sample Hand_DF CIKs: {hand_df['cik'].head(3).tolist()}")
+            print(f"DF types: {df['cik'].dtype}, Hand_DF types: {hand_df['cik'].dtype}")
+            # Check if there is even ONE common CIK
+            common = set(df['cik']).intersection(set(hand_df['cik']))
+            print(f"DEBUG: Found {len(common)} exact overlapping CIK strings.")
+# ------------------------
 
             comparison = df.merge(
                 hand_df, 
-                left_on='match_key', 
-                right_on='hand_key', 
+                on='cik',
                 how='inner'
             )
             
