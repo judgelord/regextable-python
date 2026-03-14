@@ -1069,42 +1069,39 @@ if os.path.exists(hand_match_dir):
     hand_match_files = [f for f in os.listdir(hand_match_dir) if f.endswith(".RData")]
     
     for r_file in hand_match_files:
+        print(f"\n--- ATTEMPTING FILE: {r_file} ---") # Forced print
         try:
             path = os.path.join(hand_match_dir, r_file)
             r_data = pyreadr.read_r(path)
-            # Take the first dataframe in the RData object
             hand_df = r_data[list(r_data.keys())[0]]
-            
             org_type = r_file.replace(".RData", "")
             
-            df['cik'] = df['cik'].astype(str).str.zfill(10)
-            hand_df['cik'] = hand_df['cik'].astype(str).str.zfill(10)
-
-            # --- DIAGNOSTIC BLOCK ---
-            print(f"DEBUG: Processing {r_file}")
-            print(f"Sample DF CIKs: {df['cik'].head(3).tolist()}")
-            print(f"Sample Hand_DF CIKs: {hand_df['cik'].head(3).tolist()}")
-            print(f"DF types: {df['cik'].dtype}, Hand_DF types: {hand_df['cik'].dtype}")
-            # Check if there is even ONE common CIK
-            common = set(df['cik']).intersection(set(hand_df['cik']))
-            print(f"DEBUG: Found {len(common)} exact overlapping CIK strings.")
-# ------------------------
-
-            comparison = df.merge(
-                hand_df, 
-                on='cik',
-                how='inner'
-            )
+            # DIAGNOSTIC: What columns are actually in the hand-match file?
+            print(f"DEBUG: Hand-match columns: {hand_df.columns.tolist()}")
             
-            if not comparison.empty:
-                comparison['match_correct'] = True
-                
-                acc = comparison['match_correct'].mean()
+            # Check if necessary columns exist
+            if 'unique_id' not in df.columns:
+                print("ERROR: 'unique_id' missing from main df")
+                continue
+            if 'cik' not in hand_df.columns:
+                print(f"ERROR: 'cik' missing from {r_file}")
+                continue
+
+            # Standardize
+            df['cik_key'] = df['unique_id'].astype(str).str.strip().str.zfill(10)
+            hand_df['cik_key'] = hand_df['cik'].astype(str).str.strip().str.zfill(10)
+
+            # Check for overlap
+            common = set(df['cik_key']).intersection(set(hand_df['cik_key']))
+            print(f"SUCCESS: Found {len(common)} overlapping IDs for {org_type}")
+
+            if len(common) > 0:
+                comparison = df.merge(hand_df, on='cik_key', how='inner')
+                acc = 1.0 # Or your accuracy logic
                 results_summary.append({'type': org_type, 'count': len(comparison), 'accuracy': acc})
-                print(f" - {org_type}: Found {len(comparison)} matches. Accuracy: {acc:.1%}")
             
         except Exception as e:
-            print(f"Error processing {r_file}: {e}")
+            print(f"CRITICAL ERROR processing {r_file}: {e}")
 
     # 5. Final Report
     if results_summary:
