@@ -1066,42 +1066,78 @@ results_summary = []
 
 # List all RData files in the new subfolder
 if os.path.exists(hand_match_dir):
-    hand_match_files = [f for f in os.listdir(hand_match_dir) if f.endswith(".RData")]
-    
+    hand_match_files = [f for f in os.listdir(hand_match_dir) if f.lower().endswith(".rdata")]
+    print(f"DEBUG: Found {len(hand_match_files)} matching files: {hand_match_files}")
+    print(f"DEBUG: Absolute path: {os.path.abspath(hand_match_dir)}")
+    id_mapping = {
+        'creditunions_clean': 'RSSD',
+        'nonprofit_resources_clean': 'ein',
+        'FDIC_resources_clean': 'FED_RSSD',
+        'compustat_clean': 'cik',
+        'opensecrets_clean': 'parentID'
+    }
+
     for r_file in hand_match_files:
-        print(f"\n--- ATTEMPTING FILE: {r_file} ---") # Forced print
+        org_type = r_file.replace(".Rdata", "").replace(".RData", "")
+        print(f"\n--- ANALYZING: {org_type} ---")
+        
         try:
             path = os.path.join(hand_match_dir, r_file)
             r_data = pyreadr.read_r(path)
-            hand_df = r_data[list(r_data.keys())[0]]
-            org_type = r_file.replace(".RData", "")
             
-            # DIAGNOSTIC: What columns are actually in the hand-match file?
-            print(f"DEBUG: Hand-match columns: {hand_df.columns.tolist()}")
+        
+            hand_df = next(iter(r_data.values()))
             
-            # Check if necessary columns exist
-            if 'unique_id' not in df.columns:
-                print("ERROR: 'unique_id' missing from main df")
-                continue
-            if 'cik' not in hand_df.columns:
-                print(f"ERROR: 'cik' missing from {r_file}")
+            # Figure out which ID column to use
+            hand_id_col = id_mapping.get(org_type, 'cik')
+            
+            if hand_id_col not in hand_df.columns:
+                print(f"ERROR: Column '{hand_id_col}' not found. Available: {hand_df.columns.tolist()[:5]}...")
                 continue
 
-            # Standardize
-            df['cik_key'] = df['unique_id'].astype(str).str.strip().str.zfill(10)
-            hand_df['cik_key'] = hand_df['cik'].astype(str).str.strip().str.zfill(10)
+            # Standardize BOTH IDs (stripping .0 and padding to 10 digits)
+            df['cik_key'] = df['unique_id'].astype(str).str.split('-').str[-1].str.zfill(10)
+            hand_df['cik_key'] = hand_df[hand_id_col].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(10)
 
-            # Check for overlap
+            # Check for matches
             common = set(df['cik_key']).intersection(set(hand_df['cik_key']))
-            print(f"SUCCESS: Found {len(common)} overlapping IDs for {org_type}")
+            print(f"Overlap Check: {len(common)} matches found.")
+            
+            if len(common) == 0:
+                print(f"  > Sample Main IDs: {df['cik_key'].head(3).tolist()}")
+                print(f"  > Sample Hand IDs: {hand_df['cik_key'].head(3).tolist()}")
 
             if len(common) > 0:
                 comparison = df.merge(hand_df, on='cik_key', how='inner')
-                acc = 1.0 # Or your accuracy logic
-                results_summary.append({'type': org_type, 'count': len(comparison), 'accuracy': acc})
-            
+                truth_col_map = {
+                    'compustat_clean': 'org_name',
+                    'FDIC_resources_clean': 'org_name',
+                    'creditunions_clean': 'org_name',
+                    'nonprofit_resources_clean': 'org_name',
+                    'opensecrets_clean': 'org_name'
+                }
+                truth_col = truth_col_map.get(org_type, 'name')
+                # 2. DEBUG: If it fails, see what the columns actually are
+                if truth_col not in comparison.columns:
+                    print(f"  > COLUMN MISMATCH: Looking for '{truth_col}', but found: {list(hand_df.columns)[:5]}")
+                    # Try a common fallback if the specific one fails
+                    for fallback in ['name', 'Name', 'organization', 'conm', 'org_name']:
+                        if fallback in comparison.columns:
+                            truth_col = fallback
+                            break
+                # Add to summary for the final report
+                if truth_col in comparison.columns:
+                    match_success = (comparison['matched_official_name'].str.lower().str.strip() == 
+                                    comparison[truth_col].str.lower().str.strip())
+        
+                    accuracy_val = match_success.mean()
+                    results_summary.append({'type': org_type, 'count': len(comparison), 'accuracy': accuracy_val})
+        
+                print(f"  > REAL Accuracy for {org_type}: {accuracy_val:.1%}")
+            else:
+                print(f"  > WARNING: Could not find truth column '{truth_col}' in {org_type}")
         except Exception as e:
-            print(f"CRITICAL ERROR processing {r_file}: {e}")
+            print(f"CRITICAL ERROR on {org_type}: {e}")
 
     # 5. Final Report
     if results_summary:
