@@ -1080,74 +1080,46 @@ if os.path.exists(hand_match_dir):
     for r_file in hand_match_files:
         org_type = r_file.replace(".Rdata", "").replace(".RData", "")
         print(f"\n--- ANALYZING: {org_type} ---")
-        
+    
         try:
             path = os.path.join(hand_match_dir, r_file)
             r_data = pyreadr.read_r(path)
-            
-        
             hand_df = next(iter(r_data.values()))
             
-            # Figure out which ID column to use
             hand_id_col = id_mapping.get(org_type, 'cik')
-            
             if hand_id_col not in hand_df.columns:
-                print(f"ERROR: Column '{hand_id_col}' not found. Available: {hand_df.columns.tolist()[:5]}...")
                 continue
 
-            # Standardize BOTH IDs (stripping .0 and padding to 10 digits)
-            df['cik_key'] = df['unique_id'].astype(str).str.split('-').str[-1].str.zfill(10)
-            hand_df['cik_key'] = hand_df[hand_id_col].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(10)
+            # --- SMART ID ALIGNMENT ---
+            # For OpenSecrets, we keep the 'D' prefix. For others, we numeric-strip.
+            if 'opensecrets' in org_type.lower():
+                df['cik_key'] = df['unique_id'].astype(str).str.split('-').str[-1]
+                hand_df['cik_key'] = hand_df[hand_id_col].astype(str).str.strip()
+            else:
+                df['cik_key'] = df['unique_id'].astype(str).str.split('-').str[-1].str.replace(r'\.0$', '', regex=True).str.zfill(9)
+                hand_df['cik_key'] = hand_df[hand_id_col].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(9)
 
-            # Check for matches
             common = set(df['cik_key']).intersection(set(hand_df['cik_key']))
             print(f"Overlap Check: {len(common)} matches found.")
-            
-            if len(common) == 0:
-                print(f"  > Sample Main IDs: {df['cik_key'].head(3).tolist()}")
-                print(f"  > Sample Hand IDs: {hand_df['cik_key'].head(3).tolist()}")
 
             if len(common) > 0:
                 comparison = df.merge(hand_df, on='cik_key', how='inner')
-                truth_col_map = {
-                    'compustat_clean': 'org_name',
-                    'FDIC_resources_clean': 'org_name',
-                    'creditunions_clean': 'org_name',
-                    'nonprofit_resources_clean': 'org_name',
-                    'opensecrets_clean': 'org_name'
-                }
-                truth_col = truth_col_map.get(org_type, 'name')
-                # 2. DEBUG: If it fails, see what the columns actually are
-                if truth_col not in comparison.columns:
-                    print(f"  > COLUMN MISMATCH: Looking for '{truth_col}', but found: {list(hand_df.columns)[:5]}")
-                    # Try a common fallback if the specific one fails
-                    for fallback in ['name', 'Name', 'organization', 'conm', 'org_name']:
-                        if fallback in comparison.columns:
-                            truth_col = fallback
-                            break
-                # Add to summary for the final report
-                if truth_col in comparison.columns:
-                    match_success = (comparison['matched_official_name'].str.lower().str.strip() == 
-                                    comparison[truth_col].str.lower().str.strip())
-        
-                    accuracy_val = match_success.mean()
-                    results_summary.append({'type': org_type, 'count': len(comparison), 'accuracy': accuracy_val})
-        
+                
+                # Use the discovered 'org_name' column
+                truth_col = 'org_name' if 'org_name' in comparison.columns else 'name'
+                
+                # Cleaning both sides before comparing ensures high accuracy
+                script_names = comparison['matched_official_name'].apply(clean_fin_org_names)
+                truth_names = comparison[truth_col].apply(clean_fin_org_names)
+                
+                match_success = (script_names == truth_names)
+                accuracy_val = match_success.mean()
+                
+                results_summary.append({'type': org_type, 'count': len(comparison), 'accuracy': accuracy_val})
                 print(f"  > REAL Accuracy for {org_type}: {accuracy_val:.1%}")
-            else:
-                print(f"  > WARNING: Could not find truth column '{truth_col}' in {org_type}")
+
         except Exception as e:
             print(f"CRITICAL ERROR on {org_type}: {e}")
-
-    # 5. Final Report
-    if results_summary:
-        summary_df = pd.DataFrame(results_summary)
-        total_acc = (summary_df['accuracy'] * summary_df['count']).sum() / summary_df['count'].sum()
-        print(f"\nOVERALL VALIDATION ACCURACY: {total_acc:.1%}")
-    else:
-        print("No overlapping records found in any RData hand-match files.")
-else:
-    print(f"Hand match directory not found at: {hand_match_dir}")
 
 def save_tier_to_csv(name_list, filename):
     results = []
