@@ -27,6 +27,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import pyreadr
 from collections import Counter
+from rapidfuzz import fuzz
 
 # nlp
 import spacy
@@ -217,22 +218,33 @@ def clean_fin_org_names(name: str) -> str:
     if name is None or not isinstance(name, str) or name == "NA":
         return ""
     
-    # James strip metadata from name
-    name = name.split(',')[0]
-    #Remove patterns like "10 kb pdf"
+    # Lowercase and strip metadata
+    name = name.lower().split(',')[0]
     name = PDF_PATTERN_RE.sub("", name)
 
-    #Unicode and punctuation cleanup
+    # 1. EXPAND ABBREVIATIONS (The bridge for Compustat)
+    abbrev_map = {
+        r'\bhldg\b': 'holding',
+        r'\bco\b': 'company',
+        r'\bcorp\b': 'corporation',
+        r'\binc\b': 'incorporated',
+        r'\bintl\b': 'international',
+        r'\bassn\b': 'association',
+        r'\bn\.?a\.?\b': 'national association',
+        r'\bnatl\b': 'national',
+        r'\bcl\s+[ab]\b': '', # Remove share classes
+        r'\bcommon\s+stock\b': ''
+    }
+    for pattern, replacement in abbrev_map.items():
+        name = re.sub(pattern, replacement, name)
+
+    # 2. RUN YOUR EXISTING UTILS
     name = corp_simplify_utils.normalize_unicode(name)
     name = PUNCT_RE.sub(" ", name)
-
-    #Remove corporate suffixes and stopwords and non-financial entity
     name = CORP_SUFFIX_RE.sub("", name)
     name = NON_FINANCIAL_RE.sub("", name)
     name = STOPWORD_RE.sub("", name)
-
-    #Normalize spacing and lowercase
-    name = MULTISPACE_RE.sub(" ", name).strip().lower()
+    name = MULTISPACE_RE.sub(" ", name).strip()
 
     return name
 
@@ -1065,88 +1077,112 @@ hand_match_dir = os.path.join(BASE_DIR, "data", "match_data", "hand_matches")
 results_summary = []
 
 def get_clean_prefix(name):
-    # Remove '_clean' and lowercase to make it match the id_mapping keys
-    return name.lower().replace("_clean", "").strip()
+    if pd.isna(name): return "unknown"
+    # Normalizes 'FDIC_resources_clean' or 'Compustat' to just 'fdic' or 'compustat'
+    return str(name).lower().replace("_clean", "").split('_')[0].strip()
 
-# 1. Prepare your results DataFrame with a generic prefix or a mapped one
-# Note: You may need to adjust 'df' to include the agency info if it's mixed
-df['join_key'] = df.apply(lambda row: normalize_id(row['unique_id'], get_clean_prefix(row['comment_agency'])), axis=1)
+def normalize_id(val, source_label=None):
+    if pd.isna(val): return "NAN"
+    val_str = str(val)
+    
+    # 1. Determine the Agency Namespace
+    # If the ID is 'CIK-12345', we want 'compustat'
+    # If the ID is already 'fdic_12345', we keep 'fdic'
+    if '-' in val_str:
+        raw_prefix = val_str.split('-')[0].lower()
+    else:
+        # Fallback to the source_label if no hyphen exists
+        raw_prefix = str(source_label).lower()
 
-# List all RData files in the new subfolder
+    # 2. Map raw prefixes to match your Hand-Match filenames
+    mapping = {
+        'cik': 'compustat',
+        'ffiecinstitutions': 'ffiec',
+        'creditunions': 'creditunions',
+        'opensecrets_resources_jwversion': 'opensecrets',
+    }
+    
+    clean_pre = mapping.get(raw_prefix, raw_prefix)
+    
+    # 3. Clean and pad the numeric ID
+    s = val_str.split('-')[-1].split('.')[0].strip()
+    return f"{clean_pre}_{s.zfill(10)}"
+
+
+df['join_key'] = df['unique_id'].apply(normalize_id)
+# --- DIAGNOSTIC PEEK ---
+print("\n--- NAMESPACE DIAGNOSIS ---")
+if not df.empty:
+    sample_row = df.iloc[0]
+    print(f"Main DF Agency Raw: '{sample_row['comment_agency']}'")
+    print(f"Main DF Prefix:    '{get_clean_prefix(sample_row['comment_agency'])}'")
+    print(f"Main DF Join Key:  '{sample_row['join_key']}'")
+
+# Check what the files are producing
 if os.path.exists(hand_match_dir):
-    hand_match_files = [f for f in os.listdir(hand_match_dir) if f.lower().endswith(".rdata")]
-    print(f"DEBUG: Found {len(hand_match_files)} matching files: {hand_match_files}")
-    print(f"DEBUG: Absolute path: {os.path.abspath(hand_match_dir)}")
+    for f in os.listdir(hand_match_dir)[:2]: # Just check first two
+        if f.endswith(".rdata"):
+            ot = f.replace(".Rdata","").replace(".RData","")
+            print(f"File: {f} -> Prefix: '{get_clean_prefix(ot)}'")
+print("---------------------------\n")
+
+import unicodedata
+
+def super_clean(text):
+    if not text: return ""
+    # 1. Normalize Unicode (converts \u00A0 and other ghosts to standard chars)
+    text = unicodedata.normalize('NFKD', str(text))
+    # 2. Run your existing cleaning logic
+    text = clean_fin_org_names(text)
+    # 3. Final safety: remove all double spaces and outer whitespace
+    return " ".join(text.split()).strip()
+
+if os.path.exists(hand_match_dir):
     id_mapping = {
-        'creditunions_clean': 'RSSD',
+        'creditunions_clean': 'CU_NUMBER', 
         'nonprofit_resources_clean': 'ein',
         'FDIC_resources_clean': 'FED_RSSD',
         'compustat_clean': 'cik',
         'opensecrets_clean': 'parentID'
     }
-
-
-
+    hand_match_files = [f for f in os.listdir(hand_match_dir) if f.lower().endswith(".rdata")]
     for r_file in hand_match_files:
         org_type = r_file.replace(".Rdata", "").replace(".RData", "")
-        clean_prefix = get_clean_prefix(org_type)
-        print(f"\n--- ANALYZING: {org_type} (Prefix: {clean_prefix}) ---")
-
+        current_prefix = get_clean_prefix(org_type)
+        
         try:
             path = os.path.join(hand_match_dir, r_file)
             r_data = pyreadr.read_r(path)
             hand_df = next(iter(r_data.values()))
             
             hand_id_col = id_mapping.get(org_type, 'cik')
-            if hand_id_col not in hand_df.columns:
-                print(f"  [!] ID column '{hand_id_col}' not found. Skipping.")
-                continue
+            if hand_id_col not in hand_df.columns: continue
 
-            def normalize_id(val, prefix):
-                if pd.isna(val): return "NAN"
-                s = str(val).split('-')[-1]   # Strip '2023-'
-                s = s.split('.')[0]           # Strip '.0'
-                # Adding a prefix (e.g., 'FDIC_') prevents collisions between datasets
-                return f"{prefix}_{s.strip().zfill(10)}" 
+            hand_df['join_key'] = hand_df[hand_id_col].apply(lambda x: normalize_id(x, current_prefix))
+            comparison = df.merge(hand_df, on='join_key', how='inner')
 
-            
-            # 2. Prepare the Truth Dataframe inside the loop
-            hand_df['join_key'] = hand_df[hand_id_col].apply(lambda x: normalize_id(x, clean_prefix))
-
-            # Check for overlap
-            common = set(df['join_key']).intersection(set(hand_df['join_key']))
-            print(f"  Overlap Check: {len(common)} matches found by ID.")
-
-            if len(common) > 0:
-                # Inner join to compare names for the matching IDs
-                comparison = df.merge(hand_df, on='join_key', how='inner')
-                
-                # Identify the "Truth" name column (checks common variants)
-                truth_col = next((c for c in ['org_name', 'name', 'conm'] if c in comparison.columns), None)
+            if not comparison.empty:
+                # FIX: Force CU_NAME for Credit Unions to avoid the 'e r r l' issue
+                priority_cols = ['CU_NAME', 'conm', 'name', 'org_name']
+                truth_col = next((c for c in priority_cols if c in comparison.columns), None)
                 
                 if truth_col:
-                    # Apply your cleaning function to both sides
-                    # We also add a final .lower().strip() just to be safe
-                    script_names = comparison['matched_official_name'].apply(lambda x: str(clean_fin_org_names(x)).lower().strip())
-                    truth_names = comparison[truth_col].apply(lambda x: str(clean_fin_org_names(x)).lower().strip())
+                    # Use the new super_clean function
+                    s_names = [super_clean(n) for n in comparison['matched_official_name']]
+                    t_names = [super_clean(n) for n in comparison[truth_col]]
                     
-                    match_success = (script_names == truth_names)
-                    accuracy_val = match_success.mean()
+                    exact_matches = [s == t for s, t in zip(s_names, t_names)]
+                    # We use a slightly lower fuzzy threshold (80) to account for name changes
+                    fuzzy_matches = [fuzz.token_sort_ratio(s, t) >= 80 for s, t in zip(s_names, t_names)]
+
+                    print(f"\n--- {org_type} Results ---")
+                    print(f"  Exact Accuracy: {sum(exact_matches)/len(exact_matches):.1%}")
+                    print(f"  Fuzzy Accuracy: {sum(fuzzy_matches)/len(fuzzy_matches):.1%}")
                     
-                    results_summary.append({'type': org_type, 'count': len(comparison), 'accuracy': accuracy_val})
-                    print(f"  > REAL Accuracy for {org_type}: {accuracy_val:.1%}")
-
-                    # DEBUG: This will help us see if it's a "near miss" (e.g., JPMorgan vs JPMorgan Inc)
-                    if accuracy_val < 1.0 and not comparison.empty:
-                        print(f"    Sample Match:")
-                        print(f"      - ID:     {comparison['join_key'].iloc[0]}")
-                        print(f"      - Script: {comparison['matched_official_name'].iloc[0]}")
-                        print(f"      - Truth:  {comparison[truth_col].iloc[0]}")
-                else:
-                    print(f"  [!] No name column found in {org_type} reference data.")
-
+                    if sum(exact_matches)/len(exact_matches) < 0.7:
+                        print(f"  Check: Script['{s_names[0]}'] | Truth['{t_names[0]}']")
         except Exception as e:
-            print(f"CRITICAL ERROR on {org_type}: {e}")
+            print(f"  [!] Error: {e}")
 
 
 def save_tier_to_csv(name_list, filename):
