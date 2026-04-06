@@ -14,4 +14,9 @@ no changes to clean_match_score
 no changes to get_quantile_by_variable
 no changes to get_match_candidate_score
 
-Damerau Levenshtein:
+damerau levenshtein matching utilized in get_match_candidate_score
+ - more type friendly since transpositions arent penalized as heavily
+ - token level flexibility - more lenient on different orderings of same tokens
+ - also considers entire string structure in addition to individual tokens
+ - inverse frequency in effect as well
+ - downside: time inefficient
