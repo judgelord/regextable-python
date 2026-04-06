@@ -213,6 +213,34 @@ def corpHash(s):
 
     return s
 
+def is_matchworthy_org(name):
+    if not name or not isinstance(name, str):
+        return False
+    
+    name_lower = name.lower().strip()
+    
+    # 1. Reject very short strings (unless they are exact matches in Stage 1)
+    if len(name_lower) < 4:
+        return False
+        
+    # 2. Reject common placeholders and individual descriptors
+    blacklist_patterns = [
+        r'^none$', r'^n/?a$', r'^placeholder$', r'^individual$', 
+        r'^me a ', r'^member of ', r'^mass mail', r'^title',
+        r'choose', r'select', r'retired', r'^unknown$'
+    ]
+    for pattern in blacklist_patterns:
+        if re.search(pattern, name_lower):
+            return False
+            
+    # 3. Reject strings that are mostly just numbers or symbols
+    # (e.g., "01", "24", "- - -")
+    alnum_only = re.sub(r'[^a-zA-Z0-9]', '', name_lower)
+    if alnum_only.isdigit() or len(alnum_only) < 3:
+        return False
+        
+    return True
+
 # function to clean org names
 def clean_fin_org_names(name: str) -> str:
     if name is None or not isinstance(name, str) or name == "NA":
@@ -412,6 +440,9 @@ def get_match_candidate_score(frequency_dict, org_name, candidate_match_name):
     normalized_dl = dl_distance / max(m, n)
 
     final_score = match_score * (1 - normalized_dl)
+    #dynamic threshold
+    if len(org_name) < 10 and final_score < 0.85:
+        return 0.0
     return max(0.0, final_score)
 
 
@@ -629,8 +660,11 @@ org_name_df['name_lower'] = org_name_df['original_org_name'].astype(str).str.low
 
 #STAGE 1: EXACT IDENTITY MATCH 
 print(f"Starting Stage 1: Exact Identity Matching on {len(key_names_list)} records...")
+#initialize data frame
 scraped_names_df = pd.DataFrame({'original_name': key_names_list['original_organization_name'].unique()})
+#cleaning
 scraped_names_df['clean_name'] = scraped_names_df['original_name'].astype(str).str.lower().str.strip()
+scraped_names_df = scraped_names_df[scraped_names_df['clean_name'].apply(is_matchworthy_org)]
 
 tier1_merge = scraped_names_df.merge(
     org_name_df[['org_name', 'name_lower', 'unique_id']], 
@@ -675,7 +709,10 @@ print(f"Starting Stage 2: First-Letter Blocking on {len(remaining_names)} unique
 tier2_by_source = {}
 
 for org_name in tqdm(remaining_names):
+    if not is_matchworthy_org(org_name):
+        continue
     if not org_name: continue
+
     first_char = org_name[0].upper()
     org_tokens = org_name.split(" ")
     org_token_frequencies = sorted([(t, candidate_frequency_dict.get(t, 999999)) for t in org_tokens], key=lambda x: x[1])
@@ -713,6 +750,9 @@ tier3_by_source = {}
 
 for org_name in tqdm(remaining_names):
     if len(org_name) < 4: continue
+    if not is_matchworthy_org(org_name):
+        continue
+
     org_tokens = org_name.split(" ")
     scraped_first_letters = {t[0].upper() for t in org_tokens if len(t) > 2}
     org_token_frequencies = sorted([(t, candidate_frequency_dict.get(t, 999999)) for t in org_tokens if len(t) > 3], key=lambda x: x[1])
@@ -750,7 +790,9 @@ tier4_by_source = {}
 
 for org_name in tqdm(remaining_names):
     if len(org_name) < 4: continue # Slightly more inclusive than < 5
-    
+    if not is_matchworthy_org(org_name):
+        continue
+
     org_tokens = org_name.split(" ")
     # Filter out stopwords and very short tokens to find meaningful search terms
     org_token_frequencies = sorted([
@@ -766,7 +808,7 @@ for org_name in tqdm(remaining_names):
                 score = get_match_candidate_score(candidate_frequency_dict, org_name, row[1])
                 
                 # LOWERED THRESHOLD: 0.70 allows for more fuzzy variance
-                if score > 0.10:
+                if score > 0.70:
                     candidate_matches.append((score, row[1], row[2], row[0]))
 
     if candidate_matches:
@@ -812,7 +854,7 @@ print("Num scraped records: " + str(len(key_names_list)))
 # 1.6: Extract the scraped records with at least one candidate match and take the top top_matches_num (or all if there are < top_matches_num) matches from the scored candidate matches
 # DONE: loop until we get top match from each dataset
 good_matches = {}
-threshold = 0.10
+threshold = 0.70
 counter = 0
 match_counter = 0
 covariate_dict = {}
@@ -878,7 +920,7 @@ nlp = en_core_web_lg.load()
 # 2.1: Among the matchable scraped comment records, use spacy's ner tagger to tag the tokens in the submitter name and org name of each record. 
 good_matches_org_tagged = {}
 print("Starting NLP Tagging and final match mapping...")
-threshold = 0.10
+threshold = 0.70
 
 for elem_tuple in tqdm(key_names_list.itertuples(index=False, name=None), total=len(key_names_list)):
     # original_organization_name is typically index 6 based on your cols selection
