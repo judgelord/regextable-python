@@ -19,4 +19,4 @@ damerau levenshtein matching utilized in get_match_candidate_score
  - token level flexibility - more lenient on different orderings of same tokens
  - also considers entire string structure in addition to individual tokens
  - inverse frequency in effect as well
- - downside: time inefficient
+ - downside: time inefficient, short names that should be ignored (01, none) have boosted scores
