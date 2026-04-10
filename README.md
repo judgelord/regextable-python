@@ -1,10 +1,19 @@
 # regextable-python
 
-Added non financial org terms
-Get longest common substring hasn't been modified
-get data row
 
-Damerau levenshtein - less false positives and more typo-friendly
+Get longest common substring, basichash, corpHash hasn't been modified
+Added is_matchworthy_org to account entries that we should ignore "none, 01"
+
+clean_fin_org_names:
+-added abbrev_map to bridge terminologies of compustat and cik
+- Also added non financial org terms to clean
+
+no changes to get_data_row, clean_financial_measures, get_covariate_dfs, clean_match_score, get_quantile_by_variable
+
+get_match_candidate score:
+Damerau levenshtein - distance formula is more typo-friendly, allowing for substitutions/transpositions in a token to not impact score muc
+ - token scores still based off inverse frequency
+ - multiplicative penalty allows for both individual token comparison and overall string comparison to be taken into account (final score = match_score * (1 - normalized-dl)) where match_score focuses on token and normalized_dl focuses on overall string structure
 
 Unique-id change
 
