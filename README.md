@@ -1,22 +1,19 @@
 # regextable-python
-Added to the non_financial_org_terms dictionary - lists common, ignorable words like 'university', 'association' that should not affect matching score much
 
-no changes to get_longest_common_substring
-no changes to basicHash, corpHash
+Added non financial org terms
+Get longest common substring hasn't been modified
+get data row
 
-cleaning now lowercases in addition to stripping metadata
-added abbrev_map in clean_fin_org_names that bridges abbreviation language between compustat and cik ex: hldg->holding, co->company
+Damerau levenshtein - less false positives and more typo-friendly
 
-no changes to get_data_row
-no changes to clean_financial_measure
-no changes to get_covariate_df
-no changes to clean_match_score
-no changes to get_quantile_by_variable
-no changes to get_match_candidate_score
+Unique-id change
 
-damerau levenshtein matching utilized in get_match_candidate_score
- - more type friendly since transpositions arent penalized as heavily
- - token level flexibility - more lenient on different orderings of same tokens
- - also considers entire string structure in addition to individual tokens
- - inverse frequency in effect as well
- - downside: time inefficient, short names that should be ignored (01, none) have boosted scores
+This script utilizes multiple matching algorithms in succession to efficiently match all entries, beginning with cheapest and quickest algorithms, pulling their matches out, and matching the leftovers with more nuanced, time-consuming algorithms.
+
+Stage1:Exact identity match
+
+Stage 2:First-Letter match
+
+Stage 3:Flexible first-letter match
+
+Stage 4: Relaxed fuzzy(original algorithm)

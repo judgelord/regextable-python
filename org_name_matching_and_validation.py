@@ -212,6 +212,34 @@ def corpHash(s):
 
     return s
 
+def is_matchworthy_org(name):
+    if not name or not isinstance(name, str):
+        return False
+    
+    name_lower = name.lower().strip()
+    
+    # 1. Reject very short strings (unless they are exact matches in Stage 1)
+    if len(name_lower) < 4:
+        return False
+        
+    # 2. Reject common placeholders and individual descriptors
+    blacklist_patterns = [
+        r'^none$', r'^n/?a$', r'^placeholder$', r'^individual$', 
+        r'^me a ', r'^member of ', r'^mass mail', r'^title',
+        r'choose', r'select', r'retired', r'^unknown$'
+    ]
+    for pattern in blacklist_patterns:
+        if re.search(pattern, name_lower):
+            return False
+            
+    # 3. Reject strings that are mostly just numbers or symbols
+    # (e.g., "01", "24", "- - -")
+    alnum_only = re.sub(r'[^a-zA-Z0-9]', '', name_lower)
+    if alnum_only.isdigit() or len(alnum_only) < 3:
+        return False
+        
+    return True
+
 # function to clean org names
 def clean_fin_org_names(name: str) -> str:
     if name is None or not isinstance(name, str) or name == "NA":
@@ -400,6 +428,9 @@ def get_match_candidate_score(frequency_dict, org_name, candidate_match_name):
     normalized_dl = dl_distance / max(m, n)
 
     final_score = match_score * (1 - normalized_dl)
+    #dynamic threshold
+    if len(org_name) < 10 and final_score < 0.85:
+        return 0.0
     return max(0.0, final_score)
 
 
@@ -601,6 +632,63 @@ for row_idx in tqdm(range(len(org_name_df))):
         else:
             candidate_match_dict[token] = [(unique_id, org_name, original_org_name)]
                 
+#================
+#1.5.1 CASCADE MATCHING
+#=================
+
+match_dict = {}
+names_matched_in_1 = []
+names_matched_in_2 = []
+names_matched_in_3 = []
+names_matched_in_4 = []
+
+#Create the merge key in the candidate pool pool
+print("Generating search keys for candidate pool...")
+org_name_df['name_lower'] = org_name_df['original_org_name'].astype(str).str.lower().str.strip()
+
+#STAGE 1: EXACT IDENTITY MATCH 
+print(f"Starting Stage 1: Exact Identity Matching on {len(key_names_list)} records...")
+#initialize data frame
+scraped_names_df = pd.DataFrame({'original_name': key_names_list['original_organization_name'].unique()})
+#cleaning
+scraped_names_df['clean_name'] = scraped_names_df['original_name'].astype(str).str.lower().str.strip()
+scraped_names_df = scraped_names_df[scraped_names_df['clean_name'].apply(is_matchworthy_org)]
+
+tier1_merge = scraped_names_df.merge(
+    org_name_df[['org_name', 'name_lower', 'unique_id']], 
+    left_on='clean_name', 
+    right_on='name_lower', 
+    how='inner'
+)
+
+tier1_by_source = {}
+for _, row in tier1_merge.iterrows():
+    orig_name = row['original_name']
+    official_name = row['org_name']
+
+    match_dict[orig_name] = pd.DataFrame([{
+        'match_score': 1.0,
+        'candidate_match_name': row['org_name'],
+        'original_org_name': orig_name,
+        'unique_id': row['unique_id'],
+    }])
+    names_matched_in_1.append(orig_name)
+    
+    # Organize by source
+    src = str(row['unique_id']).split('-')[0]
+    tier1_by_source.setdefault(src, []).append({
+        'scraped_uncleaned_name': orig_name, # Added
+        'matched_official_name': official_name, # Added
+        'unique_id': row['unique_id'], 
+        'score': 1.0
+    })
+
+for src, rows in tier1_by_source.items():
+    pd.DataFrame(rows).to_csv(f"matches_stage1_{src}.csv", index=False)
+
+# Define remaining unique names for fuzzy matching
+matched_set = set(names_matched_in_1)
+remaining_names = [n for n in scraped_names_df['original_name'].unique() if n not in matched_set and n != ""]
 
     # Apply linking dataset
     # 1.5.1: For each org and submitter name in the scraped comment dataset, get all of the names ('candidate matches') from among the gathered org datasets that have the most important word of the scraped db names in the org's name. Calculate a tf-idf weighted jaccard index match score to choose the best matches among the candidates.
@@ -618,14 +706,227 @@ for row_idx in tqdm(range(len(org_name_df))):
         if org_name in match_dict:
             continue
 
-        # Tokenize the submitter name and org name
-        org_tokens = org_name.split(" ")
+for org_name in tqdm(remaining_names):
+    if not is_matchworthy_org(org_name):
+        continue
+    if not org_name: continue
+
+    first_char = org_name[0].upper()
+    org_tokens = org_name.split(" ")
+    org_token_frequencies = sorted([(t, candidate_frequency_dict.get(t, 999999)) for t in org_tokens], key=lambda x: x[1])
+    
+    candidate_matches = []
+    if org_token_frequencies:
+        for most_unique_token, _ in org_token_frequencies[:1]: 
+            if most_unique_token in candidate_match_dict:
+                for row in candidate_match_dict[most_unique_token]:
+                    if row[1] and row[1][0].upper() == first_char:
+                        score = get_match_candidate_score(candidate_frequency_dict, org_name, row[1])
+                        if score > 0.10:
+                            candidate_matches.append((score, row[1], row[2], row[0]))
+
+    if candidate_matches:
+        candidate_matches.sort(key=lambda x: (-x[0], abs(len(x[1].split(" ")) - len(org_tokens))))
+        best_score, best_official_name, _, best_id = candidate_matches[0]
+        match_dict[org_name] = pd.DataFrame(candidate_matches, columns=['match_score','candidate_match_name', 'original_org_name', 'unique_id'])
+        src = str(best_id).split('-')[0]
+        tier2_by_source.setdefault(src, []).append({
+        'scraped_uncleaned_name': org_name,     # The messy name
+        'matched_official_name': best_official_name, # The official library name
+        'unique_id': best_id, 
+        'score': best_score
+        })
+
+for src, rows in tier2_by_source.items():
+    pd.DataFrame(rows).to_csv(f"matches_stage2_{src}.csv", index=False)
+
+#STAGE 3: FLEXIBLE FIRST-LETTER
+matched_set.update(names_matched_in_2)
+remaining_names = [n for n in remaining_names if n not in matched_set]
+print(f"Starting Stage 3: Flexible Match on {len(remaining_names)} names...")
+tier3_by_source = {}
+
+for org_name in tqdm(remaining_names):
+    if len(org_name) < 4: continue
+    if not is_matchworthy_org(org_name):
+        continue
+
+    org_tokens = org_name.split(" ")
+    scraped_first_letters = {t[0].upper() for t in org_tokens if len(t) > 2}
+    org_token_frequencies = sorted([(t, candidate_frequency_dict.get(t, 999999)) for t in org_tokens if len(t) > 3], key=lambda x: x[1])
+    
+    candidate_matches = []
+    if org_token_frequencies:
+        unique_token = org_token_frequencies[0][0]
+        if unique_token in candidate_match_dict:
+            for row in candidate_match_dict[unique_token]:
+                if row[1] and row[1][0].upper() in scraped_first_letters:
+                    score = get_match_candidate_score(candidate_frequency_dict, org_name, row[1])
+                    if score > 0.10:
+                        candidate_matches.append((score, row[1], row[2], row[0]))
+
+    if candidate_matches:
+        candidate_matches.sort(key=lambda x: (-x[0], abs(len(x[1].split(" ")) - len(org_tokens))))
+        best_score, best_official_name, _, best_id = candidate_matches[0]
+        match_dict[org_name] = pd.DataFrame(candidate_matches, columns=['match_score', 'candidate_match_name', 'original_org_name', 'unique_id'])
+        src = str(best_id).split('-')[0]
+        tier3_by_source.setdefault(src, []).append({
+        'scraped_uncleaned_name': org_name,     # The messy name
+        'matched_official_name': best_official_name, # The official library name
+        'unique_id': best_id, 
+        'score': best_score
+        })
+
+for src, rows in tier3_by_source.items():
+    pd.DataFrame(rows).to_csv(f"matches_stage3_{src}.csv", index=False)
+
+#STAGE 4: RELAXED FUZZY
+matched_set.update(names_matched_in_3)
+remaining_names = [n for n in remaining_names if n not in matched_set]
+print(f"Starting Stage 4: Relaxed Fuzzy (Threshold 0.70) on {len(remaining_names)} names...")
+tier4_by_source = {}
+
+for org_name in tqdm(remaining_names):
+    if len(org_name) < 4: continue # Slightly more inclusive than < 5
+    if not is_matchworthy_org(org_name):
+        continue
+
+    org_tokens = org_name.split(" ")
+    # Filter out stopwords and very short tokens to find meaningful search terms
+    org_token_frequencies = sorted([
+        (t, candidate_frequency_dict.get(t, 999999)) 
+        for t in org_tokens if t not in STOPWORDS and len(t) > 2
+    ], key=lambda x: x[1])
+    
+    candidate_matches = []
+    # Search using the top 3 unique tokens for better recall
+    for unique_token, _ in org_token_frequencies[:3]: 
+        if unique_token in candidate_match_dict:
+            for row in candidate_match_dict[unique_token]:
+                score = get_match_candidate_score(candidate_frequency_dict, org_name, row[1])
+                
+                # LOWERED THRESHOLD: 0.70 allows for more fuzzy variance
+                if score > 0.70:
+                    candidate_matches.append((score, row[1], row[2], row[0]))
+
+    if candidate_matches:
+        # Sort by score, then by how similar the word counts are
+        candidate_matches.sort(key=lambda x: (-x[0], abs(len(x[1].split(" ")) - len(org_tokens))))
+        best_score, best_official_name, _, best_id = candidate_matches[0]
+        match_dict[org_name] = pd.DataFrame(candidate_matches, columns=['match_score', 'candidate_match_name', 'original_org_name', 'unique_id'])
+        src = str(best_id).split('-')[0]
+        tier4_by_source.setdefault(src, []).append({
+        'scraped_uncleaned_name': org_name,     # The messy name
+        'matched_official_name': best_official_name, # The official library name
+        'unique_id': best_id, 
+        'score': best_score
+        })
+
+# Export new Stage 4 results
+for src, rows in tier4_by_source.items():
+    pd.DataFrame(rows).to_csv(f"matches_stage4_relaxed_{src}.csv", index=False)
+
+# FINAL CLEANUP: Ensure every record has a match entry
+print("Finalizing match dictionary for downstream processing...")
+all_unique_orgs = key_names_list['organization'].unique()
+
+for org_name in all_unique_orgs:
+    if pd.isna(org_name) or org_name == "":
+        continue
+    if org_name not in match_dict:
+        match_dict[org_name] = pd.DataFrame(columns=[
+            'match_score',
+            'candidate_match_name',
+            'original_org_name',
+            'unique_id'
+        ])
+print(f"Total unique organizations in match_dict: {len(match_dict)}")
+
+# 1.5.2: Save the candidate matches and get record counts
+# with open(BASE_DIR + "data/finreg_jaccard_match_" + curr_date + ".pkl", 'wb') as pkl_out:
+#     pickle.dump(match_dict, pkl_out)
+
+print("Num scraped records: " + str(len(key_names_list)))
+
+
+# 1.6: Extract the scraped records with at least one candidate match and take the top top_matches_num (or all if there are < top_matches_num) matches from the scored candidate matches
+# DONE: loop until we get top match from each dataset
+good_matches = {}
+threshold = 0.70
+counter = 0
+match_counter = 0
+covariate_dict = {}
+frs_counter = 0
+
+print("Mapping match results to record tuples...")
+for elem_tuple in tqdm(key_names_list.itertuples(index=False, name=None), total=len(key_names_list)):
+    # In your RData setup, the cleaned 'organization' name is at index 2 
+    # and 'original_organization_name' is at index 6 (based on your cols list)
+    cleaned_name_key = elem_tuple[2]
+    
+    if cleaned_name_key in match_dict and not match_dict[cleaned_name_key].empty:
+        df_matches = match_dict[cleaned_name_key]
+        valid_matches = df_matches[df_matches['match_score'] >= threshold]
         
-        # Get the frequencies (in the scraped comment db) of the tokens in the submitter name and org name
-        # submitter_token_frequencies = sorted([(submitter_token, submitter_frequency_dict[submitter_token]) for submitter_token in submitter_tokens], key=lambda x: x[1])
-        org_token_frequencies = [(org_token, candidate_frequency_dict.get(org_token)) for org_token in org_tokens]
-        org_token_frequencies = list(filter(lambda item: item[1] is not None, org_token_frequencies))
-        org_token_frequencies = sorted(org_token_frequencies, key=lambda x: x[1])
+        if not valid_matches.empty:
+            # We provide a placeholder for the NER tag data: (is_likely_org, tags)
+            # This allows the loop in 1.6 to unpack correctly: matches, tag_data = ...
+            good_matches[elem_tuple] = (valid_matches, (True, ["ORG"]))
+
+print(f"Bridge complete. {len(good_matches)} records ready for assembly.")
+
+print("Assembling final match results...")
+for elem_idx, elem_tuple in tqdm(enumerate(key_names_list.itertuples(index=False, name=None)), total=len(key_names_list)):
+    
+    if elem_tuple not in good_matches:
+        counter += 1
+        continue
+
+    match_counter += 1
+    # Unpack based on your specific tuple structure
+    url, submitter, cleaned_org, agency, docket, title, raw_name = elem_tuple
+
+    matches_df, tag_data = good_matches[elem_tuple]
+    is_likely_org, org_tags = tag_data
+
+    # Pull the pre-saved names from the first match
+    top_match = matches_df.iloc[0]
+    matched_official_name = top_match['candidate_match_name']
+    score = top_match['match_score']
+
+    covariate_dict[elem_tuple] = {
+        'original_org_name': raw_name,       # Mapped from KeyError
+        'comment_org_name': cleaned_org,     # Mapped from KeyError
+        'matched_official_name': matched_official_name,
+        'match_score': score,
+        'comment_url': url,                  # Mapped from KeyError
+        'docket_id': docket,                 # Mapped from KeyError
+        'comment_agency': agency,
+        'num_org_matches': len(matches_df),  # Mapped from KeyError
+        'is_likely_org': is_likely_org,
+        'org_tags': str(org_tags)
+    }
+        
+print("Num records in match_dict: " + str(len(match_dict)))
+print("Num records without a match: " + str(counter))
+print("Share of records that weren't matchable: " + str(counter / len(match_dict)))
+
+
+## PART 2: Attempt to estimate whether comment was submitted by a person or an organization
+nlp = en_core_web_lg.load()
+
+# 2.1: Among the matchable scraped comment records, use spacy's ner tagger to tag the tokens in the submitter name and org name of each record. 
+good_matches_org_tagged = {}
+print("Starting NLP Tagging and final match mapping...")
+threshold = 0.70
+
+for elem_tuple in tqdm(key_names_list.itertuples(index=False, name=None), total=len(key_names_list)):
+    # original_organization_name is typically index 6 based on your cols selection
+    name_key = elem_tuple[6] 
+    
+    if name_key in match_dict and not match_dict[name_key].empty:
+        df_matches = match_dict[name_key]
+        valid_matches = df_matches[df_matches['match_score'] >= threshold]
         
 
         candidate_matches = []
