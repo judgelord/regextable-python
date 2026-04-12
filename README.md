@@ -27,8 +27,14 @@ importing sources:
 Cascade explained:
 This script utilizes multiple matching algorithms in succession to efficiently match all entries, beginning with cheapest and quickest algorithms, pulling their matches out, and matching the leftovers with more nuanced, time-consuming algorithms.
 
-Stage1:Exact identity match
+Setting up: 
+- token frequency dictionary is built using Counter (way faster than loops)
+- candidate match dictionary:an index that is built where each token is assigned a list of id's and names to help speed up matching (unfortunately uses lots of RAM) (GoldmanSachs wont match since this relies on perfect token splitting)
+- very common words that are junk should be added to STOPWORDS to be cleaned
 
+Stage1:Exact identity match
+- strings that are exact matches are matched first
+- taken out and rest of entries are carried over to stage 2
 Stage 2:First-Letter match
 
 Stage 3:Flexible first-letter match
