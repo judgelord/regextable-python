@@ -5,7 +5,7 @@ Get longest common substring, basichash, corpHash hasn't been modified
 Added is_matchworthy_org to account entries that we should ignore "none, 01"
 
 clean_fin_org_names:
--added abbrev_map to bridge terminologies of compustat and cik
+-added abbrev_map to bridge terminologies of compustat and cik (this change was meant to try to resolve 11, so I'm unsure about this)
 - Also added non financial org terms to clean
 
 no changes to get_data_row, clean_financial_measures, get_covariate_dfs, clean_match_score, get_quantile_by_variable
@@ -35,8 +35,14 @@ Setting up:
 Stage1:Exact identity match
 - strings that are exact matches are matched first
 - taken out and rest of entries are carried over to stage 2
-Stage 2:First-Letter match
+- happens in very fast sequence using Pandas Database Join
 
+Stage 2:First-Letter match
+- Identifies rarest tokens in an entry and pulls out potential matches
+- strings with matching first letter are considered
+- matching score is calculated
 Stage 3:Flexible first-letter match
+- First letter of any important tokens in the entry are considered
+- Importance of token is decided by length (len > 3) and rarity
 
 Stage 4: Relaxed fuzzy(original algorithm)
