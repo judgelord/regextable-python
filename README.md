@@ -41,8 +41,18 @@ Stage 2:First-Letter match
 - Identifies rarest tokens in an entry and pulls out potential matches
 - strings with matching first letter are considered
 - matching score is calculated
+
 Stage 3:Flexible first-letter match
 - First letter of any important tokens in the entry are considered
 - Importance of token is decided by length (len > 3) and rarity
 
-Stage 4: Relaxed fuzzy(original algorithm)
+Stage 4: Relaxed fuzzy
+- Considers top 3 rarest words of entry
+- Ignores stopwords
+- Current threshold score of 0.70
+
+Assembly
+- Loops through entire row of info (URL, submitter, agency...) instead of just cleaned name to be able to distinguish agencies
+- Rejects top match if it doesn't meet threshold
+- Keeps more useful info(docket_id, comment agency, url) and keeps original entries to compare
+- double checks that context of name actually looks like organization using named entity recognition
