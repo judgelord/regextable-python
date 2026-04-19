@@ -56,3 +56,7 @@ Assembly
 - Rejects top match if it doesn't meet threshold
 - Keeps more useful info(docket_id, comment agency, url) and keeps original entries to compare
 - double checks that context of name actually looks like organization using named entity recognition
+
+Estimating Person or Organization
+- instead of trying to detect person tag with spacy, script now labels entities that matched to an official financial library with score >= 0.70 as organizations
+- Downside: at risk of false negatives, since we only consider entries we know for certain (>=.70) to be organizations
