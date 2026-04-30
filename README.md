@@ -57,6 +57,20 @@ Assembly
 - Keeps more useful info(docket_id, comment agency, url) and keeps original entries to compare
 - double checks that context of name actually looks like organization using named entity recognition
 
-Estimating Person or Organization
+Estimating Person or Organization (#Part 2)
 - instead of trying to detect person tag with spacy, script now labels entities that matched to an official financial library with score >= 0.70 as organizations
 - Downside: at risk of false negatives, since we only consider entries we know for certain (>=.70) to be organizations
+
+Building covariate_dict (#FINAL ASSEMBLY LOOP)
+- rows are treated as tuples instead of "series" by using "itertuples" in the for loop
+- switching to pandas bulk processing (pd.Dataframe(list...) instead of row-by-row (data.append...)
+- Now records matches as well as their context data (library, url, etc...)
+- focuses on top_match instead of using nested for loop to try to account for matches that appear in multiple libraries. Old code used to make multiple columns for each library to list the matches, but there would be lots of empty rows. Current code only takes in the top single match for better readability. (Potential downside: top match is wrong, and we cannot validate with other close matches)
+- unique_id is also featured in dictionary, allowing for relinking to original datasets if we want to
+- Now skips empty rows to save time
+
+Saving dataframe with attached covariates (#3.3)
+- Now organizes into files by agencies ex:/by_agency/SEC
+- Vectorized the process of making exact matches column (df['exact_match_present'] = (df['matched_official_name'].astype(str)...)
+
+Rest of the current script that was added was an attempt to use the hand-validated files but it does not work.
